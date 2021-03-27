@@ -1,0 +1,1291 @@
+---
+title: "esMethods_ManuscriptAnalysis"
+author: "Karen Sasmita"
+date: "11/27/2020"
+output: 
+  html_document:
+    code_folding: hide
+---
+# Setup
+
+## Load necessary packages and clear workspace
+```{r message = FALSE, warning = FALSE, loadPackages}
+library(ggplot2)
+library(viridis)
+library(lme4)
+library(lmerTest)
+library(emmeans)
+library(knitr)
+library(dplyr)
+library(drc)
+library(aomisc)
+library(nlme)
+library("ggpubr")
+library(broom)
+library(gridExtra)
+library(gtable)
+library(grid)
+library(psycho)
+rm(list = ls())
+```
+
+
+## Setup plot themes 
+```{r message = FALSE, warning = FALSE, setupPlot}
+#Set text size and colors
+txt.size = 12
+txt.color = "black"
+txt.face = "bold"
+
+###define specs for agreement values plots over sample sizes
+#agreement value colors
+d.color = "#FFC700" #actual data 
+random.color = "#00B885" #random data
+crossMov.color = "#4D4D4D" #agreement values when actual data compared to cross movie.
+factor.order <- c('crossMov', 'random', 'sample')
+factor.color <- c(crossMov.color, random.color, d.color)
+factor.shape <- c(24, 23, 21) #triangle, diamond, circle
+factor.label <- c('Cross-movie', 'Random', 'Same')
+#jitter for individual agreement values
+jitter.alpha = .1 
+jitter.width = 0.2
+#point for mean agreement value 
+point.size = 5
+point.alpha = 1
+#errorbar width 
+errorbar.width = .8
+errorbar.alpha = 1
+#elbow related plot 
+elbow.size = 8
+elbowPos.scale = .01
+
+#define specs for curvature function fittings. 
+vir_7 = viridis(n = 7) #load the first 8 viridis colors
+line.colors <- c(vir_7[1],vir_7[1], vir_7[2],vir_7[3], vir_7[4], vir_7[5], vir_7[6]) #Linear, Exponential, logarithmic, Asymptotic, Power Curve, Yield loss.
+dot.color <- vir_7[7] #color for dotplot 
+fit.jitter.alpha = .05
+fit.jitter.width = 0.3
+fit.line.size = 1.5
+fit.line.alpha = 1
+
+###define specs for saving agreement and function fit plots
+figure.width = 25
+figure.height = 19 
+figure.unit = "cm"
+figure.bg = "transparent"
+figure.filetype = "png"
+
+grain.labs <- c("Coarse", "Fine")
+names(grain.labs) <- c("c", "f")
+
+sampleSize = seq(from = 2, to = 32, by = 2)
+
+#Set theme for plotting 
+theme.esMethods <- theme(
+panel.grid.minor = element_blank(), 
+panel.grid.major = element_blank(), 
+#panel.background= element_blank(), 
+panel.border = element_blank(),
+panel.spacing = unit(.05,'in'), 
+panel.background = element_rect(fill = "transparent",colour = NA),
+plot.background = element_rect(fill = "transparent",colour = NA),
+axis.line = element_line(size = .2, colour = "black"), 
+axis.title = element_text(size = txt.size),
+axis.text = element_text(size = txt.size),
+strip.background = element_rect(colour = NA, fill = "transparent"), 
+strip.text = element_text(size = txt.size), 
+legend.title = element_blank(),
+legend.key = element_rect(colour = NA, fill = NA),
+plot.title = element_text(hjust = 0.5)
+)
+
+```
+## Define necessary functions
+
+*Function: elbow_finder Adapted from https://stackoverflow.com/questions/2018178/finding-the-best-trade-off-point-on-a-curve/2022348#2022348*
+
+Function description: to find the stabilization point (elbow) of change in segmentation agreement based on best fitting growth/ decay functions. 
+
+Returns: coordinates of curve that is furthest from the straight line connecting the minimum and maximum points. 
+
+Parameter x_values: array of x coordinates of curve 
+
+Precondition x_values: numeric
+
+Parameter x_values: array of y coordnates of curve 
+
+Precondition y_values: numeric
+
+```{r message = FALSE, warning = FALSE, defineFunction_ElbowFinder}
+elbow_finder <- function(x_values, y_values) {
+  # Max values to create line
+  max_x_x <- max(x_values)
+  max_x_y <- y_values[which.max(x_values)]
+  min_x_x <- min(x_values)
+  min_x_y <- y_values[which.min(x_values)]
+  max_df <- data.frame(x = c(min_x_x, max_x_x), y = c(min_x_y, max_x_y))
+
+  # Creating straight line between the max values
+  fit <- lm(max_df$y ~ max_df$x)
+
+  # Distance from point to line
+  distances <- c()
+  for(i in 1:length(x_values)) {
+    distances <- c(distances, abs(coef(fit)[2]*x_values[i] - y_values[i] + coef(fit)[1]) / sqrt(coef(fit)[2]^2 + 1^2))
+  }
+
+  # Max distance point
+  x_max_dist <- x_values[which.max(distances)]
+  y_max_dist <- y_values[which.max(distances)]
+
+  return(c(x_max_dist, y_max_dist))
+}
+
+```
+
+*Function: functionFits adapted from https://www.statforbiology.com/nonlinearregression/usefulequations*
+
+Function description: fit raw agreement values to growth (for peakiness, agreement index, surprise index, detection accuracy and predictive value) or decay (for peak-to-peak distance) functions
+
+Parameter y: array of dependent variable
+
+Precondition y: numeric
+
+Parameter x: array of independent variable
+
+Precondition x: factor (note: this parameter is a factor because it was taken from data frame that's fed into lmer)
+
+Parameter sampSize: sequence of sample size
+
+Precondition sampSize: 
+
+
+```{r message = FALSE, warning = FALSE, defineFunction_functionFit}
+
+functionFit <- function(y, x, sampSize){
+  x <- as.numeric(as.character(x))
+  
+  linear <- lm(y~x)
+  exponential <- tryCatch(drm(y~x, fct = DRC.expoDecay()), error = function(e) drm(y~x, fct = EXD.2()))
+  log <- drm(y ~ x, fct = DRC.logCurve())
+  asympReg <- drm(y ~ x, fct = DRC.asymReg())
+  powerCurve <- tryCatch(drm(y~x, fct = DRC.powerCurve()), error = function(e) drm(y~x, fct = L.4()))
+  yl <- nls(y~NLS.YL(x, a, i)) #yielded erratic behavior for normativeHit
+  
+  models <- c('linear','exponential', 'log', 'asympReg', 'powerCurve', 'yl')
+  model.prediction <- data.frame()
+  for (model in models){
+          assign("prediction", get(model))
+          model.prediction <- rbind(model.prediction, data.frame(func = model, sampleSize = x, prediction = predict(prediction)))
+  }
+  
+  bic <- BIC(linear,exponential,log,asympReg,powerCurve, yl)
+  aic <- AIC(linear,exponential, log, asympReg, powerCurve, yl)
+  
+  functionFit.summary <- data.frame(AIC_df = aic$df,
+                                    AIC = aic$AIC, 
+                                    BIC_df = bic$df,
+                                    BIC = bic$BIC)
+  
+  row.names(functionFit.summary) <- models
+  
+  mod.predicted <- predict(get(models[match(min(bic$BIC), bic$BIC)]), data.frame(sampSize))#, interval = 'confidence', level = .99
+  elbow_pos <- elbow_finder(sampSize, mod.predicted)
+  model <- models[match(min(bic$BIC), bic$BIC)]
+  
+  return(list(model.prediction, functionFit.summary,elbow_pos, model, coef(get(model))[3]))
+}
+```
+
+*Function: plotIndivAgreement*
+
+Function description: function to plot agreement values 
+
+Parameter df: data frame containing values for plotting 
+
+Precondition df: data frame
+
+Parameter var: variable name for y values (i.e. which agreement measure)
+
+Precondition var: string
+
+Parameter ylab: y-axis label 
+
+Precondition ylab: string
+
+Parameter ymin: minimum y axis value 
+
+Precondition ymin: numeric
+
+Parameter ymax: maximum y axis value 
+
+Precondition ymax: numeric
+
+Parameter title: plot title 
+
+Precondition title: string
+
+```{r message = FALSE, warning = FALSE, defineFunction_plotIndivAgreement}
+plotIndivAgreement <- function(df, var, ylab, ymin, ymax, title){
+  factors <- factor.order[(length(unique(df$testCond))%%3):3]
+  factor.colors <- factor.color[(length(unique(df$testCond))%%3):3]
+  factor.shapes <- factor.shape[(length(unique(df$testCond))%%3):3]
+  factor.labels <- factor.label[(length(unique(df$testCond))%%3):3]
+  transform(df, testCond=factor(testCond,levels=factors))
+  elbow = mean(df$elbow)
+
+    figure <- ggplot(df, aes(x = sampleSize, y = get(var, df), fill = testCond, color = testCond, shape = testCond))+
+    geom_jitter(alpha = jitter.alpha, width = jitter.width)+
+    stat_summary(geom = "errorbar", fun.data = "mean_cl_normal", width = errorbar.width, color = 'black', alpha = errorbar.alpha)+
+    geom_point(stat = "summary", fun = "mean", size = point.size, alpha = point.alpha, color = 'black')+
+    scale_fill_manual(values = factor.colors, labels = factor.labels)+
+    scale_color_manual(values = factor.colors, labels = factor.labels)+
+    scale_shape_manual(values = factor.shapes, labels = factor.labels)+
+    #scale_x_continuous(breaks = seq(from = 2, to = 32, by = 2))+
+    geom_text(color = "black", x = elbow/2, y =  ymin + (elbowPos.scale*(ymax - (ymin))), label = '^', size = elbow.size, show.legend = FALSE)+
+    #facet_wrap(~grain, scales='fixed', labeller = labeller(grain = c("c" = "Coarse", "f" = "Fine")))+
+    # geom_text(color = 'black', x = 6, y = -.2, label = "+", size = txt.size, show.legend = FALSE)+
+    labs(y = ylab, x = "Sample Size", title = title)+
+    ylim(ymin,ymax)+
+    theme.esMethods
+    #assign(paste('figure.', g, sep = ''), figure)`
+    #ggsave(paste(paste('figure.', g, sep = ''), ".png", sep = ""))
+    
+    return(figure)
+}
+
+```
+
+*Function: plotFunctionFits*
+
+Function description: function to plot fitted growth/ decay functions
+
+Parameter df: data frame containing values for plotting (i.e. function fit predictions)
+
+Precondition df: data frame
+
+Parameter original_df: data frame containing raw agremement values (to add as jitter) 
+
+Precondition df: data frame
+
+Parameter var: original_df variable name for agreement values (i.e. which agreement measure)
+
+Precondition var: string
+
+Parameter ylab: y-axis label 
+
+Precondition ylab: string
+
+Parameter ymin: minimum y axis value 
+
+Precondition ymin: numeric
+
+Parameter ymax: maximum y axis value 
+
+
+```{r message = FALSE, warning = FALSE, defineFunction_plotFunctionFits}
+plotFunctionFits <- function(df, original_df, var, ylab, ymin, ymax){
+  figure <- ggplot(df,aes(x = sampleSize, y = prediction, color = func))+
+  geom_jitter(data = original_df[original_df$testCond == "sample",], 
+              aes(x = as.numeric(as.character(sampleSize)), y = get(var, original_df)), alpha = fit.jitter.alpha, width = fit.jitter.width, fill = dot.color, color = dot.color)+
+  geom_line(size = fit.line.size, alpha = fit.line.alpha)+
+  scale_color_manual(values = line.colors,
+                     labels = c("Linear", "Exponential", "Logarithmic", "Asymptotic", "Power Curve", "Yield Loss"))+
+  geom_point(data = original_df[original_df$testCond == "sample",], aes (x = as.numeric(as.character(sampleSize)), y = get(var, original_df)), stat = "summary", fun = "mean", shape = 21, size = 4, color = 'black', fill = dot.color)+
+  scale_x_continuous(breaks = c(seq(from =2, to = 32, by = 2)))+
+  ylim(ymin,ymax)+
+  labs(y = ylab, x = "Sample size")+
+  #facet_wrap(~grain, scales='fixed', labeller = labeller(grain = c("c" = "Coarse", "f" = "Fine")))+
+  theme.esMethods
+  
+  return(figure)
+}
+
+```
+
+# Analyse data
+
+## Peakiness
+
+Load dataset and remove outliers for evAct peakiness (value > 20*sd)
+
+```{r message = FALSE, warning = FALSE, peakiness_loadDataset}
+setwd('../data/bootstrapped')
+peakiness.comm <- read.delim("esMethods_Peakiness_adjust_c0.1_f0.05_100Iterations_commercial.txt", head = TRUE)
+peakiness.comm$sampleSize <- as.factor(peakiness.comm$sampleSize)
+peakiness.comm$peakiness <- peakiness.comm$act.peakiness/peakiness.comm$min.peakiness
+peakiness.comm$logPeakiness <- log(peakiness.comm$peakiness, base = 10)
+
+peakiness.evAct <- read.delim("esMethods_Peakiness_adjust_c0.1_f0.05_100Iterations_evAct.txt", head = TRUE)
+peakiness.evAct$peakiness <- peakiness.evAct$act.peakiness/peakiness.evAct$min.peakiness
+peakiness.evAct <- peakiness.evAct[peakiness.evAct$peakiness < (mean(peakiness.evAct$peakiness) + (20*sd(peakiness.evAct$peakiness))),]
+peakiness.evAct$sampleSize <- as.factor(peakiness.evAct$sampleSize)
+peakiness.evAct$logActPeakiness <- log(peakiness.evAct$act.peakiness, base = 10)
+peakiness.evAct$logPeakiness <- log(peakiness.evAct$peakiness, base = 10)
+```
+
+### Fit peakiness values to growth and decay functions
+
+```{r message = FALSE, warning = FALSE, peakiness_functionFits}
+
+##commercial 
+peakiness.fit.coarse.comm <- functionFit(peakiness.comm$peakiness[peakiness.comm$grain == "c" & peakiness.comm$testCond == 'sample'], peakiness.comm$sampleSize[peakiness.comm$grain == "c" & peakiness.comm$testCond == 'sample'], sampleSize)
+peakiness.fit.fine.comm <- functionFit(peakiness.comm$peakiness[peakiness.comm$grain == "f" & peakiness.comm$testCond == 'sample'], peakiness.comm$sampleSize[peakiness.comm$grain == "f" & peakiness.comm$testCond == 'sample'], sampleSize)
+
+peakiness.functionFit <- peakiness.fit.coarse.comm[[1]] %>% mutate(grain = "c")
+peakiness.functionFit <- rbind(peakiness.functionFit, peakiness.fit.fine.comm[[1]] %>% mutate(grain = "f"))
+peakiness.functionFit$grain <- as.factor(peakiness.functionFit$grain)
+
+#peakiness.functionFit.comm.figure <- plotFunctionFits(peakiness.functionFit, peakiness.comm[peakiness.comm$testCond == "sample",], "peakiness", "Peakiness (raw)")
+
+#add elbow value to main dataframe 
+for (i in 1:nrow(peakiness.comm)){
+  if(peakiness.comm$grain[i] == 'c'){
+    peakiness.comm$elbow[i] = 0 #coarse commercial peakiness did not stabilize
+  } else {
+    peakiness.comm$elbow[i] = peakiness.functionFit[[3]][1]
+  }
+}
+
+##everyday Activities 
+peakiness.fit.coarse.evAct <- functionFit(peakiness.evAct$peakiness[peakiness.evAct$grain == "c" & peakiness.evAct$testCond == "sample"], peakiness.evAct$sampleSize[peakiness.evAct$grain == 'c' & peakiness.evAct$testCond == "sample"], sampleSize)
+peakiness.fit.fine.evAct <- functionFit(peakiness.evAct$peakiness[peakiness.evAct$grain == "f" & peakiness.evAct$testCond == "sample"], peakiness.evAct$sampleSize[peakiness.evAct$grain == 'f' & peakiness.evAct$testCond == "sample"], sampleSize)
+
+peakiness.evAct.functionFit <- peakiness.fit.coarse.evAct[[1]] %>% mutate(grain = "c")
+peakiness.evAct.functionFit <- rbind(peakiness.evAct.functionFit, peakiness.fit.fine.evAct[[1]] %>% mutate(grain = "f"))
+peakiness.evAct.functionFit$grain <- as.factor(peakiness.evAct.functionFit$grain)
+
+#peakiness.functionFit.evAct.figure <- plotFunctionFits(peakiness.evAct.functionFit, peakiness.evAct[peakiness.evAct$testCond == "sample",], "peakiness", "Peakiness (raw)") + ylim(0,50)
+
+#add elbow value to main dataframe 
+for (i in 1:nrow(peakiness.evAct)){
+  if(peakiness.evAct$grain[i] == 'c'){
+    peakiness.evAct$elbow[i] = peakiness.fit.coarse.evAct[[3]][1]
+  } else {
+    peakiness.evAct$elbow[i] = 0 #fine evAct peakiness did not stabilize
+  }
+}
+
+```
+
+### Plot peakiness over sample size
+```{r message = FALSE, warning = FALSE, peakiness_manuscriptPlot}
+peakiness.comm.coarse.plot <- plotIndivAgreement(peakiness.comm[peakiness.comm$grain == 'c',], "logPeakiness", "Peakiness (log)", 0, 2.5, "Coarse")
+peakiness.comm.fine.plot <- plotIndivAgreement(peakiness.comm[peakiness.comm$grain == 'f',],"logPeakiness", "Peakiness (log)", 0, 2.5, "Fine")
+
+peakiness.evAct.coarse.plot <- plotIndivAgreement(peakiness.evAct[peakiness.evAct$grain == 'c', ], "logPeakiness", "Peakiness (log)", 0, 2.5, "")
+peakiness.evAct.fine.plot <- plotIndivAgreement(peakiness.evAct[peakiness.evAct$grain == 'f', ],  "logPeakiness", "Peakiness (log)", 0, 2.5, "")
+
+peakiness.plot.combined <- ggarrange(peakiness.comm.coarse.plot, peakiness.comm.fine.plot,
+                                      peakiness.evAct.coarse.plot, peakiness.evAct.fine.plot,
+                                       nrow = 2, ncol = 2,
+                                       labels = c("A","", "B", ""),
+                                       common.legend = TRUE, legend = "bottom",
+                                       align = "hv")
+peakiness.plot.combined
+
+setwd('../plots')
+ggsave("esMethod_peakiness.pdf", device = cairo_pdf, width = 25, height = 19, units = "cm", bg = "transparent")
+
+```
+
+### Plot peakiness function fits
+```{r message = FALSE, warning = FALSE, peakiness_functionFit_manuscriptPlot}
+peakiness.comm.coarse.funcPlot <- plotFunctionFits(peakiness.functionFit[peakiness.functionFit$grain == 'c',], peakiness.comm[peakiness.comm$grain == 'c' & peakiness.comm$testCond == 'sample',], "peakiness", "Peakiness", 2, 24)
+peakiness.comm.fine.funcPlot <- plotFunctionFits(peakiness.functionFit[peakiness.functionFit$grain == 'f',], peakiness.comm[peakiness.comm$grain == 'f' & peakiness.comm$testCond == 'sample',], "peakiness", "Peakiness", 2, 24)
+
+peakiness.evAct.coarse.funcPlot <- plotFunctionFits(peakiness.evAct.functionFit[peakiness.evAct.functionFit$grain == 'c',], peakiness.evAct[peakiness.evAct$grain == 'c' & peakiness.evAct$testCond == 'sample',], "peakiness", "Peakiness", 2, 50)
+peakiness.evAct.fine.funcPlot <- plotFunctionFits(peakiness.evAct.functionFit[peakiness.evAct.functionFit$grain == 'f',], peakiness.evAct[peakiness.evAct$grain == 'f' & peakiness.evAct$testCond == 'sample',], "peakiness", "Peakiness", 2, 50)
+
+peakiness.funcFit.plot.combined <- ggarrange(peakiness.comm.coarse.funcPlot, peakiness.comm.fine.funcPlot,
+                                      peakiness.evAct.coarse.funcPlot, peakiness.evAct.fine.funcPlot,
+                                       nrow = 2, ncol = 2,
+                                       labels = c("A","", "B", ""),
+                                       common.legend = TRUE, legend = "bottom",
+                                       align = "hv")
+
+peakiness.funcFit.plot.combined
+
+setwd('../plots')
+ggsave("esMethod_peakiness_functionFit.pdf", device = cairo_pdf, width = 25, height = 19, units = "cm", bg = "transparent")
+
+```
+### Peakiness linear models and analysis 
+
+```{r message = FALSE, warning = FALSE, peakiness_analysis}
+peakiness.comm.lmer <- lmer(peakiness~sampleSize*grain*testCond + (1|movieName), data = peakiness.comm)
+emm_options(pbkrtest.limit = 12800)
+peakiness.comm.samp_vs_rand <- summary(emmeans(peakiness.comm.lmer, c("testCond"), by = "grain", contr = list(c1 = c(-1, 1))), infer = T)
+peakiness.comm.pairwise <- summary(emmeans(peakiness.comm.lmer, "testCond",by = c("sampleSize", "grain"), weights = "proportional", contr = "revpairwise", adjust = "none")$contrasts, infer = TRUE)#random vs sample pairwise/ sample size
+
+peakiness.comm.poly <- summary(contrast(emmeans(peakiness.comm.lmer,'sampleSize', by = c( 'grain', 'testCond')), 'poly', max.degree = 3), infer = TRUE)#Polynomial contrast
+
+peakiness.evAct.lmer <- lmer(peakiness~sampleSize*grain*testCond + (1|movieName), data = peakiness.evAct)
+emm_options(pbkrtest.limit = 25595)
+peakiness.evAct.samp_vs_rand <- summary(emmeans(peakiness.evAct.lmer, c("testCond"), by = "grain", contr = list(c1 = c(-1, 1))), infer = T)# overall random vs sample 
+peakiness.evAct.pairwise <- summary(emmeans(peakiness.evAct.lmer, "testCond",by = c("sampleSize", "grain"), weights = "proportional", contr = "revpairwise", adjust = "none")$contrasts, infer = TRUE)#pairwise comparison 
+peakiness.evAct.poly <- summary(contrast(emmeans(peakiness.evAct.lmer,'sampleSize', by = c( 'grain', 'testCond')), 'poly', max.degree = 3), infer = TRUE)#Polynomial contrast
+
+```
+Peakiness Sample - random contrast commercial-lab
+```{r message = FALSE, warning = FALSE, peakiness_comm_samp_vs_rand}
+peakiness.comm.samp_vs_rand$contrasts
+```
+Peakiness sample-random contrast everyday-online
+
+```{r message = FALSE, warning = FALSE, peakiness_evAct_samp_vs_rand}
+peakiness.evAct.samp_vs_rand$contrasts
+```
+
+Peakiness smallest pairwise effect commercial-lab
+```{r message = FALSE, warning = FALSE, peakiness_comm_pairwise}
+peakiness.comm.pairwise %>% dplyr::filter(p.value < .05, z.ratio > 0) %>% dplyr::group_by(grain) %>% filter(z.ratio == min(z.ratio))
+```
+
+Peakiness smallest pairwise effect everyday-online
+```{r message = FALSE, warning = FALSE, peakiness_evAct_pairwise}
+peakiness.evAct.pairwise %>% dplyr::filter(p.value < .05, z.ratio > 0) %>% dplyr::group_by(grain) %>% filter(z.ratio == min(z.ratio))
+```
+
+Peakiness polynomial fit commercial-lab
+```{r message = FALSE, warning = FALSE, peakiness_comm_poly_contrast}
+peakiness.comm.poly[peakiness.comm.poly$testCond == "sample",]
+```
+
+Peakiness polynomial fit commercial-lab
+```{r message = FALSE, warning = FALSE, peakiness_evAct_poly_contrast}
+peakiness.evAct.poly[peakiness.evAct.poly$testCond == "sample",]
+```
+
+## Peak-to-peak distance 
+
+Load dataset 
+
+```{r message = FALSE, warning = FALSE, peaktopeak_loadDataset}
+setwd('../data/bootstrapped')
+peaktopeak.comm <- read.delim("esMethods_PeakPeakDistance_c0.1_f0.05_100Iterations_commercial.txt", head = TRUE)
+peaktopeak.comm$sampleSize <- as.factor(peaktopeak.comm$sampleSize)
+peaktopeak.comm$logPeaktopeak <- log(peaktopeak.comm$nearestDistance, base = 10)
+
+peaktopeak.evAct <- read.delim("esMethods_PeakPeakDistance_c0.1_f0.05_100Iterations_evAct.txt", head = TRUE)
+peaktopeak.evAct$sampleSize <- as.factor(peaktopeak.evAct$sampleSize)
+peaktopeak.evAct$logPeaktopeak <- log(peaktopeak.evAct$nearestDistance, base = 10)
+```
+
+### Fit peak-to-peak values to growth and decay functions
+
+```{r message = FALSE, warning = FALSE, peaktopeak_functionFits}
+
+##commercial 
+peaktopeak.fit.coarse.comm <- functionFit(peaktopeak.comm$nearestDistance[peaktopeak.comm$grain == "c" & peaktopeak.comm$testCond == 'sample'], peaktopeak.comm$sampleSize[peaktopeak.comm$grain == "c" & peaktopeak.comm$testCond == 'sample'], sampleSize)
+peaktopeak.fit.fine.comm <- functionFit(peaktopeak.comm$nearestDistance[peaktopeak.comm$grain == "f" & peaktopeak.comm$testCond == 'sample'], peaktopeak.comm$sampleSize[peaktopeak.comm$grain == "f" & peaktopeak.comm$testCond == 'sample'], sampleSize)
+
+peaktopeak.functionFit <- peaktopeak.fit.coarse.comm[[1]] %>% mutate(grain = "c")
+peaktopeak.functionFit <- rbind(peaktopeak.functionFit, peaktopeak.fit.fine.comm[[1]] %>% mutate(grain = "f"))
+peaktopeak.functionFit$grain <- as.factor(peaktopeak.functionFit$grain)
+
+#peaktopeak.functionFit.comm.figure <- plotFunctionFits(peaktopeak.functionFit, peaktopeak.comm[peaktopeak.comm$testCond == "sample",], "nearestDistance", "Peak-to-peak distance (s)")
+
+for(i in 1:nrow(peaktopeak.comm)){
+  if(peaktopeak.comm$grain[i] == 'c'){
+    peaktopeak.comm$elbow[i] = peaktopeak.fit.coarse.comm[[3]][1]
+  }else{
+    peaktopeak.comm$elbow[i] = peaktopeak.fit.fine.comm[[3]][1]
+  }
+}
+
+##everyday Activities 
+peaktopeak.fit.coarse.evAct <- functionFit(peaktopeak.evAct$nearestDistance[peaktopeak.evAct$grain == "c" & peaktopeak.evAct$testCond == "sample"], peaktopeak.evAct$sampleSize[peaktopeak.evAct$grain == 'c' & peaktopeak.evAct$testCond == "sample"], sampleSize)
+peaktopeak.fit.fine.evAct <- functionFit(peaktopeak.evAct$nearestDistance[peaktopeak.evAct$grain == "f" & peaktopeak.evAct$testCond == "sample"], peaktopeak.evAct$sampleSize[peaktopeak.evAct$grain == 'f' & peaktopeak.evAct$testCond == "sample"], sampleSize)
+
+peaktopeak.evAct.functionFit <- peaktopeak.fit.coarse.evAct[[1]] %>% mutate(grain = "c")
+peaktopeak.evAct.functionFit <- rbind(peaktopeak.evAct.functionFit, peaktopeak.fit.fine.evAct[[1]] %>% mutate(grain = "f"))
+peaktopeak.evAct.functionFit$grain <- as.factor(peaktopeak.evAct.functionFit$grain)
+
+#peaktopeak.functionFit.evAct.figure <- plotFunctionFits(peaktopeak.evAct.functionFit, peaktopeak.evAct[peaktopeak.evAct$testCond == "sample",], "nearestDistance", "Peak-to-peak distance (s)") + ylim(0,50)
+
+for(i in 1:nrow(peaktopeak.evAct)){
+  if(peaktopeak.evAct$grain[i] == 'c'){
+    peaktopeak.evAct$elbow[i] = peaktopeak.fit.coarse.evAct[[3]][1]
+  }else{
+    peaktopeak.evAct$elbow[i] = peaktopeak.fit.fine.evAct[[3]][1]
+  }
+}
+
+```
+
+### Plot peak-to-peak over sample size
+
+Log10 transformed peak-to-peak distance over increasing sample sizes for segmentation of: A) commercial-lab and B) everyday-online. 
+
+```{r warning = FALSE, message = FALSE, peaktopeak_manuscriptPlot}
+peaktopeak.comm.coarse.plot <- plotIndivAgreement(peaktopeak.comm[peaktopeak.comm$grain == 'c',], "logPeaktopeak", "Peak to peak distance (log)", 0, 2, "Coarse")
+peaktopeak.comm.fine.plot <- plotIndivAgreement(peaktopeak.comm[peaktopeak.comm$grain == 'f',], "logPeaktopeak", "Peak to peak distance (log)", -0.5, 1.5, "Fine")
+
+peaktopeak.evAct.coarse.plot <- plotIndivAgreement(peaktopeak.evAct[peaktopeak.evAct$grain == 'c', ], "logPeaktopeak", "Peak to peak distance (log)", 0, 2, "")
+peaktopeak.evAct.fine.plot <- plotIndivAgreement(peaktopeak.evAct[peaktopeak.evAct$grain == 'f', ], "logPeaktopeak", "Peak to peak distance (log)", -0.5, 1.5, "")
+
+peaktopeak.plot.combined <- ggarrange(peaktopeak.comm.coarse.plot, peaktopeak.comm.fine.plot,
+                                      peaktopeak.evAct.coarse.plot, peaktopeak.evAct.fine.plot,
+                                       nrow = 2, ncol = 2,
+                                       labels = c("A","", "B", ""),
+                                       common.legend = TRUE, legend = "bottom",
+                                       align = "hv")
+
+peaktopeak.plot.combined
+
+setwd('../plots')
+ggsave("esMethod_peaktopeak.pdf", device = cairo_pdf, width = 25, height = 19, units = "cm", bg = "transparent", dpi = 300)
+# ggsave(plot = peaktopeak.plot.combined, file = "esMethod_peaktopeak.png", 
+#        type = "cairo-png",  bg = "transparent",
+#        width = 25, height = 19, units = "cm", dpi = 300)
+
+
+```
+
+### Plot peak-to-peak function fits
+
+Peak-to-peak values fit to various growth and decay functions over increasing sample sizes for segmentation of: A) commercial-lab and B) everyday-online. 
+
+
+```{r warning = FALSE, message = FALSE, peatopeakfunctionFit_manuscriptPlot}
+#df, original_df, var, ylab, ymin, ymax, asymptote
+peaktopeak.comm.coarse.funcPlot <- plotFunctionFits(peaktopeak.functionFit[peaktopeak.functionFit$grain == 'c',], peaktopeak.comm[peaktopeak.comm$grain == 'c' & peaktopeak.comm$testCond == 'sample',], "nearestDistance", "Peak-to-peak distance (s)", 0, 15)
+peaktopeak.comm.fine.funcPlot <- plotFunctionFits(peaktopeak.functionFit[peaktopeak.functionFit$grain == 'f',], peaktopeak.comm[peaktopeak.comm$grain == 'f' & peaktopeak.comm$testCond == 'sample',], "nearestDistance", "Peak-to-peak distance (s)", 0, 10)
+
+peaktopeak.evAct.coarse.funcPlot <- plotFunctionFits(peaktopeak.evAct.functionFit[peaktopeak.evAct.functionFit$grain == 'c',], peaktopeak.evAct[peaktopeak.evAct$grain == 'c' & peaktopeak.evAct$testCond == 'sample',], "nearestDistance", "Peak-to-peak distance (s)", 0, 25)
+peaktopeak.evAct.fine.funcPlot <- plotFunctionFits(peaktopeak.evAct.functionFit[peaktopeak.evAct.functionFit$grain == 'f',], peaktopeak.evAct[peaktopeak.evAct$grain == 'f' & peaktopeak.evAct$testCond == 'sample',], "nearestDistance", "Peak-to-peak distance (s)", 0, 5)
+
+peaktopeak.funcFit.plot.combined <- ggarrange(peaktopeak.comm.coarse.funcPlot, peaktopeak.comm.fine.funcPlot,
+                                      peaktopeak.evAct.coarse.funcPlot, peaktopeak.evAct.fine.funcPlot,
+                                       nrow = 2, ncol = 2,
+                                       labels = c("A","", "B", ""),
+                                       common.legend = TRUE, legend = "bottom",
+                                       align = "hv")
+
+peaktopeak.funcFit.plot.combined
+
+setwd('../plots')
+ggsave("esMethod_peaktopeak_functionFit.pdf", device = cairo_pdf, width = 25, height = 19, units = "cm", bg = "transparent")
+
+```
+
+### Peak-to-peak linear models and analysis 
+
+```{r warning = FALSE, message = FALSE, peaktopeak_analysis}
+
+#commercial-lab 
+peaktopeak.comm.lmer <- lmer(nearestDistance~sampleSize*grain*testCond + (1|movieName), data = peaktopeak.comm)
+emm_options(pbkrtest.limit = 19200)
+peaktopeak.comm.poly <- summary(contrast(emmeans(peaktopeak.comm.lmer,'sampleSize', by = c( 'grain', 'testCond')), 'poly', max.degree = 3), infer = TRUE)#Polynomial contrast
+peaktopeak.comm.rand_vs_samp <- summary(emmeans(peaktopeak.comm.lmer, c("testCond"), by = "grain", contr = list(c1 = c(0, 1, -1))), infer = T)# overall random - sample 
+peaktopeak.comm.crossMov_vs_samp <- summary(emmeans(peaktopeak.comm.lmer, c("testCond"), by = "grain", contr = list(c1 = c(1, 0, -1))), infer = T)# overall crossMov - sample 
+peaktopeak.comm.crossMov_vs_rand <- summary(emmeans(peaktopeak.comm.lmer, c("testCond"), by = "grain", contr = list(c1 = c(1, -1, 0))), infer = T)# overall crossMov - random 
+
+peaktopeak.comm.pairwise <- summary(emmeans(peaktopeak.comm.lmer, "testCond",by = c("sampleSize", "grain"), weights = "proportional", contr = "pairwise", adjust = "none")$contrasts, infer = TRUE)#random vs sample pairwise/ sample size
+
+#everyday-online
+peaktopeak.evAct.lmer <- lmer(nearestDistance~sampleSize*grain*testCond + (1|movieName), data = peaktopeak.evAct)
+ emm_options(pbkrtest.limit = 38400)
+peaktopeak.evAct.poly <- summary(contrast(emmeans(peaktopeak.evAct.lmer,'sampleSize', by = c( 'grain', 'testCond')), 'poly', max.degree = 3), infer = TRUE)#Polynomial contrast
+peaktopeak.evAct.rand_vs_samp <- summary(emmeans(peaktopeak.evAct.lmer, c("testCond"), by = "grain", contr = list(c1 = c(0, 1, -1))), infer = T)# overall random - sample 
+peaktopeak.evAct.crossMov_vs_samp <- summary(emmeans(peaktopeak.evAct.lmer, c("testCond"), by = "grain", contr = list(c1 = c(1, 0, -1))), infer = T)# overall crossMov - sample 
+peaktopeak.evAct.crossMov_vs_rand <- summary(emmeans(peaktopeak.evAct.lmer, c("testCond"), by = "grain", contr = list(c1 = c(1, -1, 0))), infer = T)# overall crossMov - random 
+
+peaktopeak.evAct.pairwise <- summary(emmeans(peaktopeak.evAct.lmer, "testCond",by = c("sampleSize", "grain"), weights = "proportional", contr = "pairwise", adjust = "none")$contrasts, infer = TRUE)#random vs sample pairwise/ sample size
+
+```
+
+Peak-to-peak random - sample contrast commercial-lab
+```{r message = FALSE, warning = FALSE, peaktopeak_comm_samp_vs_rand}
+peaktopeak.comm.rand_vs_samp$contrasts
+```
+
+Peak-to-peak random - sample contrast everyday-online
+```{r message = FALSE, warning = FALSE, peaktopeak_evAct_samp_vs_rand}
+peaktopeak.evAct.rand_vs_samp$contrasts
+```
+
+Peak-to-peak cross movie - sample contrast commercial-lab
+```{r message = FALSE, warning = FALSE, peaktopeak_comm_crossMov_vs_sample}
+peaktopeak.comm.crossMov_vs_samp$contrasts
+```
+
+Peak-to-peak cross movie - sample contrast everyday-online
+```{r message = FALSE, warning = FALSE, peaktopeak_evAct_crossMov_vs_samp}
+peaktopeak.evAct.crossMov_vs_samp$contrasts
+```
+
+Peak-to-peak cross movie - random contrast commercial-lab
+```{r message = FALSE, warning = FALSE, peaktopeak_comm_crossMov_vs_random}
+peaktopeak.comm.crossMov_vs_rand$contrasts
+```
+
+Peak-to-peak cross movie - random contrast everyday-online
+```{r message = FALSE, warning = FALSE, peaktopeak_evAct_crossMov_vs_rand}
+peaktopeak.evAct.crossMov_vs_rand$contrasts
+```
+
+Peak-to-peak smallest sample size for significant pairwise effect commercial-lab 
+```{r message = FALSE, warning = FALSE, peaktopeak_comm_smallestSample_pairwise}
+peaktopeak.comm.pairwise %>% dplyr::filter(p.value < .05, z.ratio > 0) %>% dplyr::group_by(grain, contrast) %>% filter(sampleSize == min(as.numeric(as.character(sampleSize))))
+```
+
+Peak-to-peak smallest sample size for significant pairwise effect everyday-online 
+```{r message = FALSE, warning = FALSE, peaktopeak_evAct_smallestSample_pairwise}
+peaktopeak.evAct.pairwise %>% dplyr::filter(p.value < .05, z.ratio > 0) %>% dplyr::group_by(grain, contrast) %>% filter(sampleSize == min(as.numeric(as.character(sampleSize))))
+```
+
+Peak-to-peak smallest pairwise effect commercial-lab
+```{r message = FALSE, warning = FALSE, peaktopeak_comm_pairwise}
+peaktopeak.comm.pairwise %>% dplyr::filter(p.value < .05, z.ratio > 0) %>% dplyr::group_by(grain, contrast) %>% filter(z.ratio == min(z.ratio))
+```
+
+Peak-to-peak smallest pairwise effect everyday-online coarse
+```{r message = FALSE, warning = FALSE, peaktopeak_evAct_pairwise_coarse}
+peaktopeak.evAct.pairwise %>% dplyr::filter(p.value < .05, z.ratio > 0) %>% dplyr::group_by(grain, contrast) %>% filter(z.ratio == min(z.ratio))
+```
+
+Peak-to-peak largest pairwise effect everyday-online fine (note: non significant effect)
+```{r message = FALSE, warning = FALSE, peaktopeak_evAct_pairwise_fine}
+peaktopeak.evAct.pairwise %>% dplyr::filter(p.value > .05, z.ratio > 0) %>% dplyr::group_by(grain, contrast) %>% filter(z.ratio == max(z.ratio))
+```
+
+Peak-to-peak polynomial fit commercial-lab
+```{r message = FALSE, warning = FALSE, peaktopeak_comm_poly_contrast}
+peaktopeak.comm.poly[peaktopeak.comm.poly$testCond == "sample",]
+```
+
+Peak-to-peak polynomial fit everyday-online
+```{r message = FALSE, warning = FALSE, peaktopeak_evAct_poly_contrast}
+peaktopeak.evAct.poly[peaktopeak.evAct.poly$testCond == "sample",]
+```
+
+## Agreement Index
+Load dataset 
+
+```{r message = FALSE, warning = FALSE, agreementIndex_loadDataset}
+setwd('../data/bootstrapped')
+agreement.comm <- read.delim("esMethods_AgreementIndex_100Iterations_commercial.txt", head = TRUE)
+agreement.comm$sampleSize <- as.factor(agreement.comm$sampleSize)
+
+agreement.evAct <- read.delim("esMethods_AgreementIndex_100Iterations_evAct.txt", head = TRUE)
+agreement.evAct$sampleSize <- as.factor(agreement.evAct$sampleSize)
+
+```
+
+### Fit Agreement Index values to growth and decay functions
+
+```{r message = FALSE, warning = FALSE, agreementIndex_functionFits}
+
+##commercial-lab 
+agreement.fit.coarse.comm <- functionFit(agreement.comm$agreementIndex[agreement.comm$grain == "c" & agreement.comm$testCond == 'sample'], agreement.comm$sampleSize[agreement.comm$grain == "c" & agreement.comm$testCond == 'sample'], sampleSize)
+agreement.fit.fine.comm <- functionFit(agreement.comm$agreementIndex[agreement.comm$grain == "f" & agreement.comm$testCond == 'sample'], agreement.comm$sampleSize[agreement.comm$grain == "f" & agreement.comm$testCond == 'sample'], sampleSize)
+
+agreement.functionFit <- agreement.fit.coarse.comm[[1]] %>% mutate(grain = "c")
+agreement.functionFit <- rbind(agreement.functionFit, agreement.fit.fine.comm[[1]] %>% mutate(grain = "f"))
+agreement.functionFit$grain <- as.factor(agreement.functionFit$grain)
+
+for(i in 1:nrow(agreement.comm)){
+  if(agreement.comm$grain[i] == 'c'){
+    agreement.comm$elbow[i] = agreement.fit.coarse.comm[[3]][1]
+  } else {
+    agreement.comm$elbow[i] = agreement.fit.fine.comm[[3]][1]
+  }
+}
+
+##everyday Activities-lab 
+agreement.fit.coarse.evAct <- functionFit(agreement.evAct$agreementIndex[agreement.evAct$grain == "c" & agreement.evAct$testCond == "sample"], agreement.evAct$sampleSize[agreement.evAct$grain == 'c' & agreement.evAct$testCond == "sample"], sampleSize)
+agreement.fit.fine.evAct <- functionFit(agreement.evAct$agreementIndex[agreement.evAct$grain == "f" & agreement.evAct$testCond == "sample"], agreement.evAct$sampleSize[agreement.evAct$grain == 'f' & agreement.evAct$testCond == "sample"], sampleSize)
+
+agreement.evAct.functionFit <- agreement.fit.coarse.evAct[[1]] %>% mutate(grain = "c")
+agreement.evAct.functionFit <- rbind(agreement.evAct.functionFit, agreement.fit.fine.evAct[[1]] %>% mutate(grain = "f"))
+agreement.evAct.functionFit$grain <- as.factor(agreement.evAct.functionFit$grain)
+
+for(i in 1:nrow(agreement.evAct)){
+  if(agreement.evAct$grain[i] == 'c'){
+    agreement.evAct$elbow[i] = agreement.fit.coarse.evAct[[3]][1]
+  } else {
+    agreement.evAct$elbow[i] = agreement.fit.fine.evAct[[3]][1]
+  }
+}
+
+
+```
+
+### Plot Agreement Index over sample size
+
+Agreement Index over increasing sample sizes for segmentation of: A) commercial-lab and B) everyday-online. 
+```{r warning = FALSE, message = FALSE, agreementIndex_manuscriptPlot}
+agreement.comm.coarse.plot <- plotIndivAgreement(agreement.comm[agreement.comm$grain == 'c',], "agreementIndex", "Agreement Index", -0.0000000000000001, 1, "Coarse")
+agreement.comm.fine.plot <- plotIndivAgreement(agreement.comm[agreement.comm$grain == 'f',],"agreementIndex", "Agreement Index", -0.0000000000000001, 1, "Fine")
+
+agreement.evAct.coarse.plot <- plotIndivAgreement(agreement.evAct[agreement.evAct$grain == 'c', ], "agreementIndex", "Agreement Index", -0.0000000000000001, 1, "")
+agreement.evAct.fine.plot <- plotIndivAgreement(agreement.evAct[agreement.evAct$grain == 'f', ],  "agreementIndex", "Agreement Index", -0.0000000000000001, 1, "")
+
+agreement.plot.combined <- ggarrange(agreement.comm.coarse.plot, agreement.comm.fine.plot,
+                                      agreement.evAct.coarse.plot, agreement.evAct.fine.plot,
+                                       nrow = 2, ncol = 2,
+                                       labels = c("A","", "B", ""),
+                                       common.legend = TRUE, legend = "bottom",
+                                       align = "hv")
+
+agreement.plot.combined
+
+setwd('../plots')
+ggsave("esMethod_agreement.pdf", device = cairo_pdf, width = 25, height = 19, units = "cm", bg = "transparent")
+# ggsave(plot = agreement.plot.combined, file = "esMethod_agreement.png", 
+#        type = "cairo-png",  bg = "transparent",
+#        width = 25, height = 19, units = "cm", dpi = 300)
+
+```
+
+### Plot Agreement Index function fits
+
+Agreement Index fit to various growth and decay functions over increasing sample sizes for segmentation of: A) commercial-lab and B) everyday-online. 
+
+```{r warning = FALSE, message = FALSE, agreementfunctionFit_manuscriptPlot}
+agreement.comm.coarse.funcPlot <- plotFunctionFits(agreement.functionFit[agreement.functionFit$grain == 'c',], agreement.comm[agreement.comm$grain == 'c' & agreement.comm$testCond == 'sample',], "agreementIndex", "Agreement Index", -0.0000000000000001, 1)
+agreement.comm.fine.funcPlot <- plotFunctionFits(agreement.functionFit[agreement.functionFit$grain == 'f',], agreement.comm[agreement.comm$grain == 'f' & agreement.comm$testCond == 'sample',], "agreementIndex", "Agreement Index", -0.0000000000000001, 1)
+
+agreement.evAct.coarse.funcPlot <- plotFunctionFits(agreement.evAct.functionFit[agreement.evAct.functionFit$grain == 'c',], agreement.evAct[agreement.evAct$grain == 'c' & agreement.evAct$testCond == 'sample',], "agreementIndex", "Agreement Index", -0.0000000000000001, 1)
+agreement.evAct.fine.funcPlot <- plotFunctionFits(agreement.evAct.functionFit[agreement.evAct.functionFit$grain == 'f',], agreement.evAct[agreement.evAct$grain == 'f' & agreement.evAct$testCond == 'sample',], "agreementIndex", "Agreement Index", -0.0000000000000001, 1)
+
+agreement.funcFit.plot.combined <- ggarrange(agreement.comm.coarse.funcPlot, agreement.comm.fine.funcPlot,
+                                      agreement.evAct.coarse.funcPlot, agreement.evAct.fine.funcPlot,
+                                       nrow = 2, ncol = 2,
+                                       labels = c("A","", "B", ""),
+                                       common.legend = TRUE, legend = "bottom",
+                                       align = "hv")
+
+agreement.funcFit.plot.combined
+
+setwd('../plots')
+ggsave("esMethod_agreement_functionFit.pdf", device = cairo_pdf, width = 25, height = 19, units = "cm", bg = "transparent")
+
+```
+### Agreement Index linear models and analysis 
+
+```{r warning = FALSE, message = FALSE, agreementIndex_analysis}
+
+#Commercial 
+agreement.comm.lmer <- lmer(agreementIndex~sampleSize*grain*testCond + (1|movieName), data = agreement.comm)
+emm_options(pbkrtest.limit = 19200)
+agreement.comm.poly <- summary(contrast(emmeans(agreement.comm.lmer,'sampleSize', by = c( 'grain', 'testCond')), 'poly', max.degree = 3), infer = TRUE)#Polynomial contrast
+agreement.comm.rand_vs_samp <- summary(emmeans(agreement.comm.lmer, c("testCond"), by = "grain", contr = list(c1 = c(0, -1, 1))), infer = T)# overall random - sample 
+agreement.comm.crossMov_vs_samp <- summary(emmeans(agreement.comm.lmer, c("testCond"), by = "grain", contr = list(c1 = c(-1, 0, 1))), infer = T)# overall crossMov - sample 
+agreement.comm.crossMov_vs_rand <- summary(emmeans(agreement.comm.lmer, c("testCond"), by = "grain", contr = list(c1 = c(-1, 1, 0))), infer = T)# overall crossMov - random 
+
+agreement.comm.pairwise <- summary(emmeans(agreement.comm.lmer, "testCond",by = c("sampleSize", "grain"), weights = "proportional", contr = "revpairwise", adjust = "none")$contrasts, infer = TRUE)#random vs sample pairwise/ sample size
+
+agreement.evAct.lmer <- lmer(agreementIndex~sampleSize*grain*testCond + (1|movieName), data = agreement.evAct)
+emm_options(pbkrtest.limit = 38400)
+agreement.evAct.poly <- summary(contrast(emmeans(agreement.evAct.lmer,'sampleSize', by = c( 'grain', 'testCond')), 'poly', max.degree = 3), infer = TRUE)#Polynomial contrast
+agreement.evAct.rand_vs_samp <- summary(emmeans(agreement.evAct.lmer, c("testCond"), by = "grain", contr = list(c1 = c(0, -1, 1))), infer = T)# overall random - sample 
+agreement.evAct.crossMov_vs_samp <- summary(emmeans(agreement.evAct.lmer, c("testCond"), by = "grain", contr = list(c1 = c(-1, 0, 1))), infer = T)# overall crossMov - sample 
+agreement.evAct.crossMov_vs_rand <- summary(emmeans(agreement.evAct.lmer, c("testCond"), by = "grain", contr = list(c1 = c(-1, 1, 0))), infer = T)# overall crossMov - random 
+
+agreement.evAct.pairwise <- summary(emmeans(agreement.evAct.lmer, "testCond",by = c("sampleSize", "grain"), weights = "proportional", contr = "revpairwise", adjust = "none")$contrasts, infer = TRUE)#random vs sample pairwise/ sample size
+
+```
+
+Agreement Index random - sample contrast commercial-lab
+```{r message = FALSE, warning = FALSE, agreement_comm_samp_vs_rand}
+agreement.comm.rand_vs_samp$contrasts
+```
+
+Agreement Index random - sample contrast everyday-online
+```{r message = FALSE, warning = FALSE, agreement_evAct_samp_vs_rand}
+agreement.evAct.rand_vs_samp$contrasts
+```
+
+Agreement Index cross movie - sample contrast commercial-lab
+```{r message = FALSE, warning = FALSE, agreement_comm_crossMov_vs_sample}
+agreement.comm.crossMov_vs_samp$contrasts
+```
+Agreement Index cross movie - sample contrast everyday-online
+```{r message = FALSE, warning = FALSE, agreement_evAct_crossMov_vs_sample}
+agreement.evAct.crossMov_vs_samp$contrasts
+```
+
+Agreement Index cross movie - random contrast commercial-lab
+```{r message = FALSE, warning = FALSE, agreement_comm_crossMov_vs_random}
+agreement.comm.crossMov_vs_rand$contrasts
+```
+Agreement Index cross movie - random contrast everyday-online
+```{r message = FALSE, warning = FALSE, agreement_evAct_crossMov_vs_random}
+agreement.evAct.crossMov_vs_rand$contrasts
+```
+
+Agreement Index smallest sample size for significant pairwise effect commercial-lab 
+```{r message = FALSE, warning = FALSE, agreement_comm_smallestSample_pairwise}
+agreement.comm.pairwise %>% dplyr::filter(p.value < .05, z.ratio > 0) %>% dplyr::group_by(grain, contrast) %>% filter(sampleSize == min(as.numeric(as.character(sampleSize))))
+```
+
+Agreement Index smallest sample size for significant pairwise effect everyday-online 
+```{r message = FALSE, warning = FALSE, agreement_evAct_smallestSample_pairwise}
+agreement.evAct.pairwise %>% dplyr::filter(p.value < .05, z.ratio > 0) %>% dplyr::group_by(grain, contrast) %>% filter(sampleSize == min(as.numeric(as.character(sampleSize))))
+```
+
+Agreement Index smallest pairwise effect commercial-lab
+```{r message = FALSE, warning = FALSE, agreement_comm_pairwise}
+agreement.comm.pairwise %>% dplyr::filter(p.value < .05, z.ratio > 0) %>% dplyr::group_by(grain, contrast) %>% filter(z.ratio == min(z.ratio))
+```
+
+Agreement Index smallest pairwise effect everyday-online
+```{r message = FALSE, warning = FALSE, agreement_evAct_pairwise}
+agreement.evAct.pairwise %>% dplyr::filter(p.value < .05, z.ratio > 0) %>% dplyr::group_by(grain, contrast) %>% filter(z.ratio == min(z.ratio))
+```
+
+Agreement Index polynomial fit commercial-lab
+```{r message = FALSE, warning = FALSE, agreement_comm_poly_contrast}
+agreement.comm.poly[agreement.comm.poly$testCond == "sample",]
+```
+
+Agreement Index polynomial fit everyday-online
+```{r message = FALSE, warning = FALSE, agreement_evAct_poly_contrast}
+agreement.evAct.poly[agreement.evAct.poly$testCond == "sample",]
+```
+
+## Surprise Index
+Load dataset 
+
+```{r warning = FALSE, message = FALSE, surpriseIndex_loadDataset}
+setwd('../data/bootstrapped')
+
+surprise.comm <- read.delim("esMethods_SurpriseIndex_c0.1_f0.05_100Iterations_commercial.txt", head = TRUE)
+surprise.comm$sampleSize <- as.factor(surprise.comm$sampleSize)
+surprise.comm$logSurprise <- log(surprise.comm$surpriseIndex, base = 10)
+
+surprise.evAct <- read.delim("esMethods_SurpriseIndex_c0.1_f0.05_100Iterations_evAct.txt", head = TRUE)
+surprise.evAct$sampleSize <- as.factor(surprise.evAct$sampleSize)
+surprise.evAct$logSurprise <- log(surprise.evAct$surpriseIndex, base = 10)
+
+```
+
+### Fit Surprise Index values to growth and decay functions
+```{r warning = FALSE, message = FALSE, surpriseIndex_functionFits}
+
+##commercial 
+surprise.fit.coarse.comm <- functionFit(surprise.comm$surpriseIndex[surprise.comm$grain == "c" & surprise.comm$testCond == 'sample'], surprise.comm$sampleSize[surprise.comm$grain == "c" & surprise.comm$testCond == 'sample'], sampleSize)
+surprise.fit.fine.comm <- functionFit(surprise.comm$surpriseIndex[surprise.comm$grain == "f" & surprise.comm$testCond == 'sample'], surprise.comm$sampleSize[surprise.comm$grain == "f" & surprise.comm$testCond == 'sample'], sampleSize)
+
+surprise.functionFit <- surprise.fit.coarse.comm[[1]] %>% mutate(grain = "c")
+surprise.functionFit <- rbind(surprise.functionFit, surprise.fit.fine.comm[[1]] %>% mutate(grain = "f"))
+surprise.functionFit$grain <- as.factor(surprise.functionFit$grain)
+
+#surprise.functionFit.comm.figure <- plotFunctionFits(surprise.functionFit, surprise.comm[surprise.comm$testCond == "sample",], "surpriseIndex", "Surprise Index (raw)")
+
+for(i in 1:nrow(surprise.comm)){
+  if(surprise.comm$grain[i] == 'c'){
+    surprise.comm$elbow[i] = surprise.fit.coarse.comm[[3]][1]
+  } else {
+    surprise.comm$elbow[i] = surprise.fit.fine.comm[[3]][1]
+  }
+}
+
+##everyday Activities 
+surprise.fit.coarse.evAct <- functionFit(surprise.evAct$surpriseIndex[surprise.evAct$grain == "c" & surprise.evAct$testCond == "sample"], surprise.evAct$sampleSize[surprise.evAct$grain == 'c' & surprise.evAct$testCond == "sample"], sampleSize)
+surprise.fit.fine.evAct <- functionFit(surprise.evAct$surpriseIndex[surprise.evAct$grain == "f" & surprise.evAct$testCond == "sample"], surprise.evAct$sampleSize[surprise.evAct$grain == 'f' & surprise.evAct$testCond == "sample"], sampleSize)
+
+surprise.evAct.functionFit <- surprise.fit.coarse.evAct[[1]] %>% mutate(grain = "c")
+surprise.evAct.functionFit <- rbind(surprise.evAct.functionFit, surprise.fit.fine.evAct[[1]] %>% mutate(grain = "f"))
+surprise.evAct.functionFit$grain <- as.factor(surprise.evAct.functionFit$grain)
+
+#surprise.functionFit.evAct.figure <- plotFunctionFits(surprise.evAct.functionFit, surprise.evAct[surprise.evAct$testCond == "sample",], "surpriseIndex", "Surprise Index (raw)") + ylim(0,15)
+
+for(i in 1:nrow(surprise.evAct)){
+  if(surprise.evAct$grain[i] == 'c'){
+    surprise.evAct$elbow[i] = surprise.fit.coarse.evAct[[3]][1]
+  } else {
+    surprise.evAct$elbow[i] = surprise.fit.fine.evAct[[3]][1]
+  }
+}
+
+```
+
+### Plot log10 Surprise Index over sample size
+
+Log10 transformed peak-to-peak distance over increasing sample sizes for segmentation of: A) commercial-lab and B) everyday-online. 
+```{r warning = FALSE, message = FALSE, surpriseIndex_manuscriptPlot}
+surprise.comm.coarse.plot <- plotIndivAgreement(surprise.comm[surprise.comm$grain == 'c',], "logSurprise", "Surprise Index (log)", -1, 2, "Coarse")
+surprise.comm.fine.plot <- plotIndivAgreement(surprise.comm[surprise.comm$grain == 'f',], "logSurprise", "Surprise Index (log)", -1, 2, "Fine")
+
+surprise.evAct.coarse.plot <- plotIndivAgreement(surprise.evAct[surprise.evAct$grain == 'c', ],  "logSurprise", "Surprise Index (log)", -1, 2, "")
+surprise.evAct.fine.plot <- plotIndivAgreement(surprise.evAct[surprise.evAct$grain == 'f', ],  "logSurprise", "Surprise Index (log)", -1, 2, "")
+
+surprise.plot.combined <- ggarrange(surprise.comm.coarse.plot, surprise.comm.fine.plot,
+                                      surprise.evAct.coarse.plot, surprise.evAct.fine.plot,
+                                       nrow = 2, ncol = 2,
+                                       labels = c("A","", "B", ""),
+                                       common.legend = TRUE, legend = "bottom",
+                                       align = "hv")
+
+surprise.plot.combined
+
+setwd('../plots')
+ggsave("esMethod_surprise.pdf", device = cairo_pdf, width = 25, height = 19, units = "cm", bg = "transparent", dpi = 300)
+
+
+```
+
+### Plot Surprise Index function fits
+
+Peak-to-peak values fit to various growth and decay functions over increasing sample sizes for segmentation of: A) commercial-lab and B) everyday-online. 
+```{r warning = FALSE, message = FALSE, surprisefunctionFit_manuscriptPlot}
+surprise.comm.coarse.funcPlot <- plotFunctionFits(surprise.functionFit[surprise.functionFit$grain == 'c',], surprise.comm[surprise.comm$grain == 'c' & surprise.comm$testCond == 'sample',], "surpriseIndex", "Surprise Index", 0, 15)
+surprise.comm.fine.funcPlot <- plotFunctionFits(surprise.functionFit[surprise.functionFit$grain == 'f',], surprise.comm[surprise.comm$grain == 'f' & surprise.comm$testCond == 'sample',], "surpriseIndex", "Surprise Index", 0, 15)
+
+surprise.evAct.coarse.funcPlot <- plotFunctionFits(surprise.evAct.functionFit[surprise.evAct.functionFit$grain == 'c',], surprise.evAct[surprise.evAct$grain == 'c' & surprise.evAct$testCond == 'sample',], "surpriseIndex", "Surprise Index", 0, 15)
+surprise.evAct.fine.funcPlot <- plotFunctionFits(surprise.evAct.functionFit[surprise.evAct.functionFit$grain == 'f',], surprise.evAct[surprise.evAct$grain == 'f' & surprise.evAct$testCond == 'sample',], "surpriseIndex", "Surprise Index", 0, 15)
+
+surprise.funcFit.plot.combined <- ggarrange(surprise.comm.coarse.funcPlot, surprise.comm.fine.funcPlot,
+                                      surprise.evAct.coarse.funcPlot, surprise.evAct.fine.funcPlot,
+                                       nrow = 2, ncol = 2,
+                                       labels = c("A","", "B", ""),
+                                       common.legend = TRUE, legend = "bottom",
+                                       align = "hv")
+
+surprise.funcFit.plot.combined
+
+setwd('../plots')
+ggsave("esMethod_surprise_functionFit.pdf", device = cairo_pdf, width = 25, height = 19, units = "cm", bg = "transparent")
+
+```
+
+### Surprise Index linear models and analysis 
+```{r warning = FALSE, message = FALSE, surpriseIndex_analysis}
+
+#Commercial 
+surprise.comm.lmer <- lmer(surpriseIndex~sampleSize*grain*testCond + (1|movieName), data = surprise.comm)
+emm_options(lmerTest.limit = 19200)
+surprise.comm.poly <- summary(contrast(emmeans(surprise.comm.lmer,'sampleSize', by = c( 'grain', 'testCond')), 'poly', max.degree = 3), infer = TRUE)#Polynomial contrast
+surprise.comm.rand_vs_samp <- summary(emmeans(surprise.comm.lmer, c("testCond"), by = "grain", contr = list(c1 = c(0, -1, 1))), infer = T)# overall random - sample 
+surprise.comm.crossMov_vs_samp <- summary(emmeans(surprise.comm.lmer, c("testCond"), by = "grain", contr = list(c1 = c(-1, 0, 1))), infer = T)# overall crossMov - sample 
+surprise.comm.crossMov_vs_rand <- summary(emmeans(surprise.comm.lmer, c("testCond"), by = "grain", contr = list(c1 = c(-1, 1, 0))), infer = T)# overall crossMov - random 
+
+surprise.comm.pairwise <- summary(emmeans(surprise.comm.lmer, "testCond",by = c("sampleSize", "grain"), weights = "proportional", contr = "revpairwise", adjust = "none")$contrasts, infer = TRUE)#random vs sample pairwise/ sample size
+
+surprise.evAct.lmer <- lmer(surpriseIndex~sampleSize*grain*testCond + (1|movieName), data = surprise.evAct)
+emm_options(lmerTest.limit = 38400)
+surprise.evAct.poly <- summary(contrast(emmeans(surprise.evAct.lmer,'sampleSize', by = c( 'grain', 'testCond')), 'poly', max.degree = 3), infer = TRUE)#Polynomial contrast
+surprise.evAct.rand_vs_samp <- summary(emmeans(surprise.evAct.lmer, c("testCond"), by = "grain", contr = list(c1 = c(0, -1, 1))), infer = T)# overall random - sample 
+surprise.evAct.crossMov_vs_samp <- summary(emmeans(surprise.evAct.lmer, c("testCond"), by = "grain", contr = list(c1 = c(-1, 0, 1))), infer = T)# overall crossMov - sample 
+surprise.evAct.crossMov_vs_rand <- summary(emmeans(surprise.evAct.lmer, c("testCond"), by = "grain", contr = list(c1 = c(1, -1, 0))), infer = T)# overall crossMov - random
+
+surprise.evAct.pairwise <- summary(emmeans(surprise.evAct.lmer, "testCond",by = c("sampleSize", "grain"), weights = "proportional", contr = "revpairwise", adjust = "none")$contrasts, infer = TRUE)#random vs sample pairwise/ sample size
+
+```
+
+Surprise Index random - sample contrast commercial-lab
+```{r message = FALSE, warning = FALSE, surprise_comm_samp_vs_rand}
+surprise.comm.rand_vs_samp$contrasts
+```
+Surprise Index random - sample contrast everyday-online
+```{r message = FALSE, warning = FALSE, surprise_evAct_samp_vs_rand}
+surprise.evAct.rand_vs_samp$contrasts
+```
+
+Surprise Index cross movie - sample contrast commercial-lab
+```{r message = FALSE, warning = FALSE, surprise_comm_crossMov_vs_sample}
+surprise.comm.crossMov_vs_samp$contrasts
+```
+Surprise Index cross movie - sample contrast everyday-online
+```{r message = FALSE, warning = FALSE, surprise_evAct_crossMov_vs_sample}
+surprise.evAct.crossMov_vs_samp$contrasts
+```
+
+Surprise Index cross movie - random contrast commercial-lab
+```{r message = FALSE, warning = FALSE, surprise_comm_crossMov_vs_random}
+surprise.comm.crossMov_vs_rand$contrasts
+```
+Surprise Index cross movie - random contrast everyday-online
+```{r message = FALSE, warning = FALSE, surprise_evAct_crossMov_vs_random}
+surprise.evAct.crossMov_vs_rand$contrasts
+```
+
+Surprise Index smallest sample size for significant pairwise effect commercial-lab 
+```{r message = FALSE, warning = FALSE, surprise_comm_smallestSample_pairwise}
+surprise.comm.pairwise %>% dplyr::filter(p.value < .05, z.ratio > 0) %>% dplyr::group_by(grain, contrast) %>% filter(sampleSize == min(as.numeric(as.character(sampleSize))))
+```
+Surprise Index smallest sample size for significant pairwise effect everyday-online 
+```{r message = FALSE, warning = FALSE, surprise_evAct_smallestSample_pairwise}
+surprise.evAct.pairwise %>% dplyr::filter(p.value < .05, z.ratio > 0) %>% dplyr::group_by(grain, contrast) %>% filter(sampleSize == min(as.numeric(as.character(sampleSize))))
+```
+
+Surprise Index smallest pairwise effect commercial-lab
+```{r message = FALSE, warning = FALSE, surprise_comm_pairwise}
+surprise.comm.pairwise %>% dplyr::filter(p.value < .05, z.ratio > 0) %>% dplyr::group_by(grain, contrast) %>% filter(z.ratio == min(z.ratio))
+```
+Surprise Index smallest pairwise effect everyday-online
+```{r message = FALSE, warning = FALSE, surprise_evAct_pairwise}
+surprise.evAct.pairwise %>% dplyr::filter(p.value < .05, z.ratio > 0) %>% dplyr::group_by(grain, contrast) %>% filter(z.ratio == min(z.ratio))
+```
+
+Surprise Index polynomial fit commercial-lab
+```{r message = FALSE, warning = FALSE, surprise_comm_poly_contrast}
+surprise.comm.poly[surprise.comm.poly$testCond == "sample",]
+```
+Surprise Index polynomial fit everyday-online
+```{r message = FALSE, warning = FALSE, surprise_evAct_poly_contrast}
+surprise.evAct.poly[surprise.evAct.poly$testCond == "sample",]
+```
+
+## Predictive value and detection accuracy 
+Load dataset 
+
+```{r warning = FALSE, message = FALSE, normativeHit_loadDataset}
+setwd('../data/bootstrapped')
+normativeHit.comm <- read.delim("esMethods_normativeHitRate_bin_100Iterations_commercial.txt", head = TRUE)
+
+predictive.value<- normativeHit.comm %>% dplyr::select(Iteration, sampleSize, movieName, grain, testCond, normativePPV, normativeFalsePPV)
+predictive.value$dPrime <- qnorm(predictive.value$normativePPV) - qnorm(predictive.value$normativeFalsePPV)
+predictive.value <- predictive.value %>% dplyr::filter(is.finite(predictive.value$dPrime))
+predictive.value$sampleSize <- as.factor(predictive.value$sampleSize)
+
+detection.sensitivity <- normativeHit.comm %>% dplyr::select(Iteration, sampleSize, movieName, grain, testCond, normativeHit, normativeFA, normativeMiss, normativeCR)
+detection.sensitivity$dPrime <- qnorm(detection.sensitivity$normativeHit) - qnorm(detection.sensitivity$normativeFA)
+detection.sensitivity <- detection.sensitivity %>% dplyr::filter(is.finite(detection.sensitivity$dPrime))
+detection.sensitivity$sampleSize <- as.factor(detection.sensitivity$sampleSize)
+
+```
+
+### Fit predictive value and detection accuracy values to growth and decay functions
+```{r warning = FALSE, message = FALSE, normativeHit_functionFits}
+
+#zalladPrime
+predictive.fit.coarse <- functionFit(predictive.value$dPrime[predictive.value$grain == "c" & predictive.value$testCond == 'sample'], predictive.value$sampleSize[predictive.value$grain == "c" & predictive.value$testCond == 'sample'], sampleSize)
+predictive.fit.coarse <- functionFit(predictive.value$dPrime[predictive.value$grain == "f" & predictive.value$testCond == 'sample'], predictive.value$sampleSize[predictive.value$grain == "f" & predictive.value$testCond == 'sample'], sampleSize)
+
+predictive.functionFit <- predictive.fit.coarse[[1]] %>% mutate(grain = "c")
+predictive.functionFit <- rbind(predictive.functionFit, predictive.fit.coarse[[1]] %>% mutate(grain = "f"))
+predictive.functionFit$grain <- as.factor(predictive.functionFit$grain)
+
+for(i in 1:nrow(predictive.value)){
+  if(predictive.value$grain[i] == 'c'){
+    predictive.value$elbow[i] = predictive.fit.coarse[[3]][1]
+  } else {
+    predictive.value$elbow[i] = predictive.fit.coarse[[3]][1]
+  }
+}
+
+
+##commercial 
+detection.sensitivity.fit.coarse.comm <- functionFit(detection.sensitivity$dPrime[detection.sensitivity$grain == "c" & detection.sensitivity$testCond == 'sample'], detection.sensitivity$sampleSize[detection.sensitivity$grain == "c" & detection.sensitivity$testCond == 'sample'], sampleSize)
+detection.sensitivity.fit.fine.comm <- functionFit(detection.sensitivity$dPrime[detection.sensitivity$grain == "f" & detection.sensitivity$testCond == 'sample'], detection.sensitivity$sampleSize[detection.sensitivity$grain == "f" & detection.sensitivity$testCond == 'sample'], sampleSize)
+
+detection.sensitivity.functionFit <- detection.sensitivity.fit.coarse.comm[[1]] %>% mutate(grain = "c")
+detection.sensitivity.functionFit <- rbind(detection.sensitivity.functionFit, detection.sensitivity.fit.fine.comm[[1]] %>% mutate(grain = "f"))
+detection.sensitivity.functionFit$grain <- as.factor(detection.sensitivity.functionFit$grain)
+
+
+for(i in 1:nrow(detection.sensitivity)){
+  if(detection.sensitivity$grain[i] == 'c'){
+    detection.sensitivity$elbow[i] = detection.sensitivity.fit.coarse.comm[[3]][1]
+  } else {
+    detection.sensitivity$elbow[i] = detection.sensitivity.fit.fine.comm[[3]][1]
+  }
+}
+
+
+```
+
+### Plot predictive value and detection accuracy over sample size
+
+Predictive value and detection accuracy over increasing sample sizes for segmentation of: A) commercial-lab and B) everyday-online. 
+```{r warning = FALSE, message = FALSE, predictive_detection_manuscriptPlot}
+predictive.value.comm.coarse.plot <- plotIndivAgreement(predictive.value[predictive.value$grain == 'c',], "dPrime", "Predictive value", -6, 1, "Coarse")
+predictive.value.comm.fine.plot <- plotIndivAgreement(predictive.value[predictive.value$grain == 'f',],"dPrime", "Predictive value", -6, 1, "Fine")
+
+predictive.value.plot <- ggarrange(predictive.value.comm.coarse.plot, predictive.value.comm.fine.plot,
+                                       nrow = 1, ncol = 2,
+                                       common.legend = TRUE, legend = "bottom",
+                                       align = "hv")
+
+detection.sensitivity.coarse.plot <- plotIndivAgreement(detection.sensitivity[detection.sensitivity$grain == 'c',], "dPrime", "Detection accuracy", -1, 2, "Coarse")
+detection.sensitivity.fine.plot <- plotIndivAgreement(detection.sensitivity[detection.sensitivity$grain == 'f',], "dPrime", "Detection accuracy", -1, 2, "Fine")
+
+detection.sensitivity.plot <- ggarrange(detection.sensitivity.coarse.plot, detection.sensitivity.fine.plot,
+                                       nrow = 1, ncol = 2,
+                                       common.legend = TRUE, legend = "bottom",
+                                       align = "hv")
+
+predictive.detection.accuracy <- ggarrange(predictive.value.plot, detection.sensitivity.plot,
+                                  nrow = 2, ncol = 1,
+                                  common.legend = TRUE, legend = "bottom",
+                                  labels = c("A","B"),
+                                  align = "hv")
+
+predictive.detection.accuracy
+
+setwd('../plots')
+ggsave("esMethod_predictive&detection.pdf", device = cairo_pdf, width = 25, height = 19, units = "cm", bg = "transparent")
+
+```
+
+### Plot predictive value and detection accuracy function fits
+
+Predictive value and detection accuracy fit to various growth and decay functions over increasing sample sizes for segmentation of: A) commercial-lab and B) everyday-online. 
+```{r warning = FALSE, message = FALSE, predictive_detectionfunctionFit_manuscriptPlot}
+predictive.coarse.funcPlot <- plotFunctionFits(predictive.functionFit[predictive.functionFit$grain == 'c',], predictive.value[predictive.value$grain == 'c' & predictive.value$testCond == 'sample',], "dPrime", "Predictive value", -4, 0)
+predictive.fine.funcPlot <- plotFunctionFits(predictive.functionFit[predictive.functionFit$grain == 'f',], predictive.value[predictive.value$grain == 'f' & predictive.value$testCond == 'sample',], "dPrime", "Predictive value", -4, 0)
+
+detection.coarse.funcPlot <- plotFunctionFits(detection.sensitivity.functionFit[detection.sensitivity.functionFit$grain == 'c',], detection.sensitivity[detection.sensitivity$grain == 'c' & detection.sensitivity$testCond == 'sample',], "dPrime", "Detection accuracy", -1, 2)
+detection.fine.funcPlot <- plotFunctionFits(detection.sensitivity.functionFit[detection.sensitivity.functionFit$grain == 'f',], detection.sensitivity[detection.sensitivity$grain == 'f' & detection.sensitivity$testCond == 'sample',], "dPrime", "Detection accuracy", -1, 2)
+
+
+predictive.detection.funcFit.plot.combined <- ggarrange(predictive.coarse.funcPlot, predictive.fine.funcPlot,
+                                      detection.coarse.funcPlot, detection.fine.funcPlot,
+                                       nrow = 2, ncol = 2,
+                                       labels = c("A","", "B", ""),
+                                       common.legend = TRUE, legend = "bottom",
+                                       align = "hv")
+
+predictive.detection.funcFit.plot.combined
+
+setwd('../plots')
+ggsave("esMethod_predictive&detection_functionFit.pdf", device = cairo_pdf, width = 25, height = 19, units = "cm", bg = "transparent")
+
+```
+
+### Predictive value and detection accuracy linear models and analysis 
+```{r warning = FALSE, message = FALSE, normativeHit_analysis}
+
+#Predictive value  
+predictive.value.lmer <- lmer(dPrime~sampleSize*grain*testCond + (1|movieName), data = predictive.value)
+emm_options(lmerTest.limit = 19029)
+
+predictive.rand_vs_samp <- summary(emmeans(predictive.value.lmer, c("testCond"), by = "grain", contr = list(c1 = c(0, -1, 1))), infer = T)# overall random - sample 
+predictive.crossMov_vs_samp <- summary(emmeans(predictive.value.lmer, c("testCond"), by = "grain", contr = list(c1 = c(-1, 0, 1))), infer = T)# overall crossMov - sample 
+predictive.crossMov_vs_rand <- summary(emmeans(predictive.value.lmer, c("testCond"), by = "grain", contr = list(c1 = c(1, -1, 0))), infer = T)# overall crossMov - random 
+
+predictive.poly <- summary(contrast(emmeans(predictive.value.lmer,'sampleSize', by = c( 'grain', 'testCond')), 'poly', max.degree = 3), infer = TRUE)#Polynomial contrast
+
+predictive.pairwise <- summary(emmeans(predictive.value.lmer, "testCond",by = c("sampleSize", "grain"), weights = "proportional", contr = "revpairwise", adjust = "none")$contrasts, infer = TRUE)#random vs sample pairwise/ sample size
+
+#Detection sensitivity  
+detection.sensitivity.lmer <- lmer(dPrime~sampleSize*grain*testCond + (1|movieName), data = detection.sensitivity)
+emm_options(lmerTest.limit = 19029)
+detection.poly <- summary(contrast(emmeans(detection.sensitivity.lmer,'sampleSize', by = c( 'grain', 'testCond')), 'poly', max.degree = 3), infer = TRUE)#Polynomial contrast
+detection.rand_vs_samp <- summary(emmeans(detection.sensitivity.lmer, c("testCond"), by = "grain", contr = list(c1 = c(0, -1, 1))), infer = T)# overall random - sample 
+detection.crossMov_vs_samp <- summary(emmeans(detection.sensitivity.lmer, c("testCond"), by = "grain", contr = list(c1 = c(-1, 0, 1))), infer = T)# overall crossMov - sample 
+detection.crossMov_vs_rand <- summary(emmeans(detection.sensitivity.lmer, c("testCond"), by = "grain", contr = list(c1 = c(1, -1, 0))), infer = T)# overall crossMov - random 
+
+detection.pairwise <- summary(emmeans(detection.sensitivity.lmer, "testCond",by = c("sampleSize", "grain"), weights = "proportional", contr = "revpairwise", adjust = "none")$contrasts, infer = TRUE)#random vs sample pairwise/ sample size
+
+```
+
+Predictive value random - sample contrast commercial-lab
+```{r message = FALSE, warning = FALSE, predictive_comm_samp_vs_rand}
+predictive.rand_vs_samp$contrasts
+```
+
+Detection value random - sample contrast commercial-lab
+```{r message = FALSE, warning = FALSE, detection_comm_samp_vs_rand}
+detection.rand_vs_samp$contrasts
+```
+
+Predictive value cross movie - sample contrast commercial-lab
+```{r message = FALSE, warning = FALSE, predictive_crossMov_vs_sample}
+predictive.crossMov_vs_samp$contrasts
+```
+
+Detection value cross movie - sample contrast commercial-lab
+```{r message = FALSE, warning = FALSE, detection_crossMov_vs_sample}
+detection.crossMov_vs_samp$contrasts
+```
+
+Predictive value cross movie - random contrast commercial-lab
+```{r message = FALSE, warning = FALSE, predictive_crossMov_vs_random}
+predictive.crossMov_vs_rand$contrasts
+```
+
+Detection value cross movie - random contrast commercial-lab
+```{r message = FALSE, warning = FALSE, detection_crossMov_vs_random}
+detection.crossMov_vs_rand$contrasts
+```
+
+Predictive value smallest sample size for significant pairwise effect commercial-lab 
+```{r message = FALSE, warning = FALSE, predictive_smallestSample_pairwise}
+predictive.pairwise %>% dplyr::filter(p.value < .05, z.ratio > 0) %>% dplyr::group_by(grain, contrast) %>% filter(sampleSize == min(as.numeric(as.character(sampleSize))))
+```
+
+Detection value smallest sample size for significant pairwise effect commercial-lab 
+```{r message = FALSE, warning = FALSE, detection_smallestSample_pairwise}
+detection.pairwise %>% dplyr::filter(p.value < .05, z.ratio > 0) %>% dplyr::group_by(grain, contrast) %>% filter(sampleSize == min(as.numeric(as.character(sampleSize))))
+```
+
+Predictive value smallest pairwise effect commercial-lab
+```{r message = FALSE, warning = FALSE, predictive_pairwise}
+predictive.pairwise %>% dplyr::filter(p.value < .05, z.ratio > 0) %>% dplyr::group_by(grain, contrast) %>% filter(z.ratio == min(z.ratio))
+```
+
+Detection value smallest pairwise effect commercial-lab
+```{r message = FALSE, warning = FALSE, detection_pairwise}
+detection.pairwise %>% dplyr::filter(p.value < .05, z.ratio > 0) %>% dplyr::group_by(grain, contrast) %>% filter(z.ratio == min(z.ratio))
+```
+
+Predictive value polynomial fit commercial-lab
+```{r message = FALSE, warning = FALSE,predictive_poly_contrast}
+predictive.poly[predictive.poly$testCond == "sample",]
+```
+
+Detection value polynomial fit commercial-lab
+```{r message = FALSE, warning = FALSE,detection_poly_contrast}
+detection.poly[detection.poly$testCond == "sample",]
+```
+
+#Extra analyses 
+
+```{r warning = FALSE, message = FALSE, loadTimeseries}
+setwd('../data/raw')
+ts.data.commercial <- read.delim("esMethods_Commercial_TimeSeries.txt", head = TRUE)
+ts.data.evAct <- read.delim("esMethods_EvAct_TimeSeries.txt", head = TRUE)
+names(ts.data.commercial)[names(ts.data.commercial) == "movName"] <- "movieName"
+names(ts.data.evAct)[names(ts.data.evAct) == "movName"] <- "movieName"
+```
+Correlate correlation between segmentation of different movies
+```{r warning = FALSE, message = FALSE, movie_correlation}
+comm.gp.bp <- ts.data.commercial %>% dplyr::group_by(grain, movieName, timeSeries) %>% dplyr::summarise(bp = mean(subject.bp))
+evAct.gp.bp <- ts.data.evAct %>% dplyr::group_by(grain, movieName, timeSeries) %>% dplyr::summarise(bp = mean(subject.bp))
+
+comm.corr.fine <- cor.test(comm.gp.bp$bp[comm.gp.bp$movieName == "3Iron" & comm.gp.bp$grain == "f"],
+                           comm.gp.bp$bp[comm.gp.bp$movieName == "Corn" & comm.gp.bp$grain == "f"])
+
+comm.corr.coarse <- cor.test(comm.gp.bp$bp[comm.gp.bp$movieName == "3Iron" & comm.gp.bp$grain == "c"],
+                           comm.gp.bp$bp[comm.gp.bp$movieName == "Corn" & comm.gp.bp$grain == "c"])
+
+evAct.corr.fine.bed_coffee <- cor.test(evAct.gp.bp$bp[evAct.gp.bp$movieName == "w_bed.mp4" & evAct.gp.bp$grain == "f"],
+                           evAct.gp.bp$bp[evAct.gp.bp$movieName == "w_coffee.mp4" & evAct.gp.bp$grain == "f"])
+evAct.corr.fine.bed_dishes <- cor.test(evAct.gp.bp$bp[evAct.gp.bp$movieName == "w_bed.mp4" & evAct.gp.bp$grain == "f"],
+                           evAct.gp.bp$bp[evAct.gp.bp$movieName == "w_dishes.mp4" & evAct.gp.bp$grain == "f"])
+evAct.corr.fine.bed_laundry <- cor.test(evAct.gp.bp$bp[evAct.gp.bp$movieName == "w_bed.mp4" & evAct.gp.bp$grain == "f"],
+                           evAct.gp.bp$bp[evAct.gp.bp$movieName == "w_laundry.mp4" & evAct.gp.bp$grain == "f"])
+
+evAct.corr.coarse.bed_coffee <- cor.test(evAct.gp.bp$bp[evAct.gp.bp$movieName == "w_bed.mp4" & evAct.gp.bp$grain == "c"],
+                           evAct.gp.bp$bp[evAct.gp.bp$movieName == "w_coffee.mp4" & evAct.gp.bp$grain == "c"])
+evAct.corr.coarse.bed_dishes <- cor.test(evAct.gp.bp$bp[evAct.gp.bp$movieName == "w_bed.mp4" & evAct.gp.bp$grain == "c"],
+                           evAct.gp.bp$bp[evAct.gp.bp$movieName == "w_dishes.mp4" & evAct.gp.bp$grain == "c"])
+evAct.corr.coarse.bed_laundry <- cor.test(evAct.gp.bp$bp[evAct.gp.bp$movieName == "w_bed.mp4" & evAct.gp.bp$grain == "c"],
+                           evAct.gp.bp$bp[evAct.gp.bp$movieName == "w_laundry.mp4" & evAct.gp.bp$grain == "c"])
+
+
+evAct.corr.fine.coffee_dishes <- cor.test(evAct.gp.bp$bp[evAct.gp.bp$movieName == "w_coffee.mp4" & evAct.gp.bp$grain == "f"],
+                           evAct.gp.bp$bp[evAct.gp.bp$movieName == "w_dishes.mp4" & evAct.gp.bp$grain == "f"])
+evAct.corr.fine.coffee_laundry <- cor.test(evAct.gp.bp$bp[evAct.gp.bp$movieName == "w_coffee.mp4" & evAct.gp.bp$grain == "f"],
+                           evAct.gp.bp$bp[evAct.gp.bp$movieName == "w_laundry.mp4" & evAct.gp.bp$grain == "f"])
+
+
+evAct.corr.coarse.coffee_dishes <- cor.test(evAct.gp.bp$bp[evAct.gp.bp$movieName == "w_coffee.mp4" & evAct.gp.bp$grain == "c"],
+                           evAct.gp.bp$bp[evAct.gp.bp$movieName == "w_dishes.mp4" & evAct.gp.bp$grain == "c"])
+evAct.corr.coarse.coffee_laundry <- cor.test(evAct.gp.bp$bp[evAct.gp.bp$movieName == "w_coffee.mp4" & evAct.gp.bp$grain == "c"],
+                           evAct.gp.bp$bp[evAct.gp.bp$movieName == "w_laundry.mp4" & evAct.gp.bp$grain == "c"])
+
+
+evAct.corr.fine.dishes_laundry <- cor.test(evAct.gp.bp$bp[evAct.gp.bp$movieName == "w_dishes.mp4" & evAct.gp.bp$grain == "f"],
+                           evAct.gp.bp$bp[evAct.gp.bp$movieName == "w_laundry.mp4" & evAct.gp.bp$grain == "f"])
+
+evAct.corr.coarse.dishes_laundry <- cor.test(evAct.gp.bp$bp[evAct.gp.bp$movieName == "w_dishes.mp4" & evAct.gp.bp$grain == "c"],
+                           evAct.gp.bp$bp[evAct.gp.bp$movieName == "w_laundry.mp4" & evAct.gp.bp$grain == "c"])
+
+```
