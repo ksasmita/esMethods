@@ -18,7 +18,7 @@ Folder: code
 >Contains all the codes used to generate bootstraps and analyses
 >>'get.esMethods.metrices.R' - contain all the functions to calculate the various agreement measures, called by 'esMethods_GenerateIterations'
 >>
->>'esMethods_GenerateIterations.rmd' - generated bootstrapps for all agreement measures for both datasets, generated output goes to ../data/bootstrapped
+>>'esMethods_GenerateIterations.rmd' - generated bootstraps for all agreement measures for both datasets, generated output goes to ../data/bootstrapped
 >>
 >>'esMethods_ManuscriptAnalysis.rmd' - perform all analyses and plotting included in the manuscript, plot output goes to ../plots
 
