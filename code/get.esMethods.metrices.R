@@ -109,8 +109,8 @@ get.peakiness = function(y.vect, mov.dur, sub.list, adj.size, bw){
   # Adapted from script written: programmed 06.09.16 by Khena Swallow
   # Changed: take bandwidth input 
   #
-  # Returns: peakiness value calculated using rugo function and minimum peakiness
-  # Minimum peakiness calculated:
+  # Returns: minimum and actual rugosity values (Peakiness not yet calculated from this code chunk. Peakiness reported in the manuscript was calculated in esMethods_ManuscriptAnalysis.rmd)
+  # Minimum rugosity calculated:
   # Evenly distributes button presses through the movie in order to minimize overlap and maximize smoothness in the group time series.
   # The algorithm will count the total number of button presses across participants, then generate a sequence of evenly spaced button presses across the movie.
   # These evenly spaced button presses will then be used to calculate button press density over time, and the minimum smoothness of the time series.
