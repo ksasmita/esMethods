@@ -1,13 +1,19 @@
 ---
 title: "esMethods_GenerateIterations"
-author: "Karen Sasmita"
-date: "4/27/2020"
 output: html_document
 ---
+
+This script generates multiple multiple new dataset from the sample dataset. Creation of new dataset is done: 
+1. By resampling presence/ absence of button press at every 1s interval from the performance of the overall sample 
+2. By resampling button press times from the performance of the overall sample 
+
 
 ```{r libraryLoad}
 library(dplyr)
 library(ggplot2)
+library(foreach)
+library(doSNOW)
+library(gmp)
 rm(list = ls())
 source("get.esMethods.metrices.r")
 ```
@@ -111,15 +117,37 @@ plotAgreementValues <- function(df, var, ylab){
 
 Define parameters for bootstrapping, values are the same for commercial and every activity movies. Change these values for different number of iterations and sample sizes. 
 ```{r defineParameters}      
-n.iterations = 10
+n.iterations = 1000
 sampleSize.min = 2
 sampleSize.max = 32
 sampleSize.interval = 2
 ```
 
+Set progress bar display
+
+```{r set_progressBar}
+###function to display progress bar
+pb <- txtProgressBar(min=1, max=n.iterations, style=3)
+progress <- function(n) setTxtProgressBar(pb, n)
+opts <- list(progress=progress)
+```
+
+**Load files** 
+Load segmentation data -> this dataset contain participants' button press times. 
+Standardize the variable names across comm and evAct datasets
+
+```{r loadSegmentationData}
+setwd('../data/raw')
+segment.data.commercial <- read.delim("esMethods_Commercial_SegmentData_Filtered.txt", head = TRUE)
+segment.data.evAct <- read.delim("esMethods_EvAct_SegmentData_Filtered.txt", head = TRUE)
+names(segment.data.evAct)[names(segment.data.evAct) == "movie"] <- "movieName"
+names(segment.data.evAct)[names(segment.data.evAct) == "time"] <- "bpTime"
+
+```
+
 Define function to extract sample datasets. For every sample size, participants' data were randomly sampled with replacement. The resultant sub-sample may therefore, contain multiple copies of data from the same participant. The following function ensures that every duplicated dataset gets treated independently in subsequent analysis by adding an additional index for every dataset (newid). Therefore, for a sample size of 10, the sampled data will comprise of data with newid 1 - 10. This will also add a new variable: a "random" segmentation data. This new variable is created by:
 1. For button press times: randomly generating n number from a uniform distribution with a min value of 0 and max value of movie duration, where n = total number of button press for every individual. 
-2. Timeseries of presence/absence of button press: reordering every individual's timeseries. 
+2. Timeseries of presence/absence of button press: randomly reordering every individual's timeseries. 
 
 Parameter subids: array of subject ids for loading data 
 
@@ -137,38 +165,34 @@ Parameter mov.dur: movie duration (s)
 
 Precondition mov.dur: numeric 
 
-```{r essentialFunctions}
+```{r resampleData}
 get.sample.dataset = function(subids, dataset, randomiseVariable, mov.dur){
   data.df <- data.frame()
-  for(i in 1:length(subids)){
-    id.index <- subids[i]
-    if (randomiseVariable == "bpTime"){
-      sample.id <- dplyr::filter(dataset, subid %in% id.index) %>%  dplyr::filter(bpTime < mov.dur) %>%  dplyr::group_by(grain, movieName) %>%  dplyr::mutate(bpTime.rand = runif(n(), 0, mov.dur)) %>% ungroup()
-    } else if (randomiseVariable == "bpPresence"){
-      sample.id <-  dplyr::filter(dataset, subid %in% id.index) %>%  dplyr::filter(timeSeries < mov.dur) %>%  dplyr::group_by(grain, movieName) %>%  dplyr::mutate(subject.bp.rand = sample(subject.bp)) %>% ungroup()
-    }
-    sample.id$newid <- i
-    data.df <- rbind(data.df, sample.id)
+  newids = seq(from = 1, to = length(subids), by = 1)
+
+  sample.id.bpTime <- function(id.index){
+    sample.id <- dplyr::filter(dataset, subid %in% id.index) %>%  dplyr::filter(bpTime < mov.dur) %>%  dplyr::group_by(grain, movieName) %>%  dplyr::mutate(bpTime.rand = runif(n(), 0, mov.dur)) %>% ungroup()
   }
+  
+  sample.id.ts <- function(id.index){
+    sample.id <-  dplyr::filter(dataset, subid %in% id.index) %>%  dplyr::filter(timeSeries < mov.dur) %>%  dplyr::group_by(grain, movieName) %>%  dplyr::mutate(subject.bp.rand = sample(subject.bp)) %>% ungroup()
+  }
+  
+  if(randomiseVariable == "bpPresence"){
+    data.df <- lapply(subids, sample.id.ts)
+  } else if(randomiseVariable == "bpTime"){
+    data.df <- lapply(subids, sample.id.bpTime)
+  }
+  
+  data.df <- foreach(dat = data.df, newid = newids) %do% cbind(dat, newid)
+  data.df <- do.call(rbind, data.df)
+
   return(data.df)
 }
 
 ```
 
-**Load files** 
-Load segmentation data -> this datasets contain participants' button press times. 
-Standardize the variable names across comm and evAct datasets
-
-```{r loadSegmentationData}
-setwd('../data/raw')
-segment.data.commercial <- read.delim("esMethods_Commercial_SegmentData.txt", head = TRUE)
-segment.data.commercial$subid[segment.data.commercial$condition == "Ordered"] <- segment.data.commercial$subid[segment.data.commercial$condition == "Ordered"] + 35 
-segment.data.evAct <- read.delim("esMethods_EvAct_SegmentData.txt", head = TRUE)
-names(segment.data.evAct)[names(segment.data.evAct) == "movie"] <- "movieName"
-names(segment.data.evAct)[names(segment.data.evAct) == "time"] <- "bpTime"
-```
-
- Because our analyses involve comparisons between different movies, we will utilise a portion of each dataset, following the shortest movie duration.  -->
+Because our analyses involve comparisons between different movies, we will utilise a portion of each dataset, following the shortest movie duration.
 ```{r truncateData}
 movieDur.commercial = 566 #duration of shortest commercial movie (in seconds)
 segment.data.commercial <- segment.data.commercial %>% filter(bpTime < movieDur.commercial)
@@ -176,192 +200,12 @@ movieDur.evAct = 273 #duration of shortest everyday activity videos (in seconds)
 segment.data.evAct <- segment.data.evAct %>% filter(bpTime < movieDur.evAct)
 ```
 
-**Peak to peak distance.**
-Peak to peak distance measures how far apart are two independent groups' (sample and test group) boundary placement in time. This measure is calculated by first estimating the density distributions of each group's segmentation data. We then extract timepoints of the highest density for each group, creating an array of peak times.For both groups, the amount of peak times extracted is based on the average number of boundaries identified by the sample group. We subtract each sample's peak time with the test group's peaktime of the nearest value. We repeat this process one more time, subtracting each test group's peak time with the sample's nearest peak times. The average of these difference values is the resultant peak to peak distance. 
-
-*Commercial*
-```{r getEssentials_commercial}
-movieDur <- 566 
-movieNames <- as.character(unique(segment.data.commercial$movieName))
-segmentGrains <- as.character(unique(segment.data.commercial$grain))
-```
-
-```{r peaktopeakdistance_commercial}
-iterations = seq(from = 1, to = n.iterations, by = 1)
-sample.sizes = seq(from = sampleSize.min, to = sampleSize.max, by = sampleSize.interval)
-subjects = unique(segment.data.commercial$subid)
-#Resultant density bandwidth = bw*adj.size
-bw = 'sj' #Recommended by R is 'sj' -> minimises mean integrated squared error
-###
-sample.types <- c("sample", "random", "crossMov")
-nearestDistance <- data.frame()
-
-for (it in iterations){
-  for (s.size in sample.sizes){
-    sample.subid <- sample(subjects, size = s.size, replace = TRUE)
-    test.subid <- sample(subjects[!subjects %in% sample.subid], size = s.size, replace = TRUE)
-    sample.data <- get.sample.dataset(sample.subid, segment.data.commercial, "bpTime", movieDur)
-    test.data <- get.sample.dataset(test.subid, segment.data.commercial, "bpTime", movieDur)
-    for (movie in movieNames){
-      crossMovie <- movieNames[movieNames!=movie]
-      for(segmentGrain in segmentGrains){
-        if (segmentGrain == 'c'){
-          adj.size = 0.1
-        } else {
-          adj.size = 0.05
-        }
-        dt.sample <- sample.data %>% dplyr::filter(movieName == movie, grain == segmentGrain)
-        dt.test <- test.data %>% dplyr::filter(movieName == movie, grain == segmentGrain)
-        dt.crossMov <- sample.data %>% dplyr::filter(movieName == crossMovie, grain == segmentGrain)
-        
-        ave.bp = dt.sample %>% dplyr::group_by(newid) %>% dplyr::summarise(bp.no = length(bpTime)) %>% dplyr::summarise(bp = mean(bp.no))
-        
-        near.dist.sample <- get.peaktopeak.distance(dt.sample$bpTime, dt.test$bpTime, movieDur, adj.size, ave.bp$bp, bw)
-        near.dist.random <- get.peaktopeak.distance(dt.sample$bpTime.rand, dt.test$bpTime.rand, movieDur, adj.size, ave.bp$bp, bw)
-        near.dist.crossMov <- get.peaktopeak.distance(dt.crossMov$bpTime, dt.test$bpTime, movieDur, adj.size, ave.bp$bp, bw)
-        
-        for (sample.type in sample.types){
-          assign("near.dist", get(paste("near.dist.", sample.type, sep = "")))
-          nearestDistance <- rbind(nearestDistance, data.frame(Iteration = it, sampleSize = s.size, movieName = movie, grain = segmentGrain, testCond = sample.type, nearestDistance = near.dist$nearestDistance, nPeak_sample = near.dist$sample_nPeaks, ave_samplePeakInterval = near.dist$ave_samplePeakInterval, sd_samplePeakInterval = near.dist$sd_samplePeakInterval, nPeak_test = near.dist$test_nPeaks, ave_testPeakInterval = near.dist$ave_testPeakInterval, sd_testPeakInterval = near.dist$sd_testPeakInterval))
-        }
-      }
-    }
-  }
-  print(it)
-}
-
-#plot figure to check trend 
-peaktopeak.comm.plot <- plotAgreementValues(nearestDistance, "nearestDistance", "Peak-to-peak distance(s)")
-peaktopeak.comm.plot
-
-# setwd('../data/bootstrapped')
-# write.table(nearestDistance,"esMethods_PeakPeakDistance_c0.1_f0.05_100Iterations_commercial.txt", sep="\t",row.names=FALSE)
-```
-
-Calculate average button press bootstrapped data from n.iterations times of each sample size 
-```{r average button press_commercial}
-iterations = seq(from = 1, to = n.iterations, by = 1)
-sample.sizes = seq(from = sampleSize.min, to = sampleSize.max, by = sampleSize.interval)
-subjects = unique(segment.data.commercial$subid)
-#Resultant density bandwidth = bw*adj.size
-bw = 'sj' #Recommended by R is 'sj' -> minimises mean integrated squared error
-###
-sample.types <- c("sample", "random", "crossMov")
-average.bp <- data.frame()
-
-for (it in iterations){
-  for (s.size in sample.sizes){
-    sample.subid <- sample(subjects, size = s.size, replace = TRUE)
-    test.subid <- sample(subjects[!subjects %in% sample.subid], size = s.size, replace = TRUE)
-    sample.data <- get.sample.dataset(sample.subid, segment.data.commercial, "bpTime", movieDur)
-    test.data <- get.sample.dataset(test.subid, segment.data.commercial, "bpTime", movieDur)
-    for (movie in movieNames){
-      for(segmentGrain in segmentGrains){
-        if (segmentGrain == 'c'){
-          adj.size = 0.1
-        } else {
-          adj.size = 0.05
-        }
-        dt.sample <- sample.data %>% dplyr::filter(movieName == movie, grain == segmentGrain)
-        
-        ave.bp = dt.sample %>% dplyr::group_by(newid) %>% dplyr::summarise(bp.no = length(bpTime)) %>% dplyr::summarise(bp = mean(bp.no))
-        average.bp <- rbind(average.bp, data.frame('iteration' = it, 'sampleSize'= s.size, 'grain' = segmentGrain, 'movie' = movie, 'ave.bp' = ave.bp$bp))
-      }
-    }
-  }
-  print(it)
-}
-
-ave.bp <- average.bp %>% group_by(sampleSize, grain, movie) %>% dplyr::summarise(mean.bp = mean(ave.bp))
-
-
-```
-
-*Everyday activities* 
-
-```{r getEssentials_evAct}
-movieDur <- 273 
-movieNames <- as.character(unique(segment.data.evAct$movieName))
-segmentGrains <- as.character(unique(segment.data.evAct$grain))
-```
-
-```{r peaktopeakdistance_evAct}
-iterations = seq(from = 1, to = n.iterations, by = 1)
-sample.sizes = seq(from = sampleSize.min, to = sampleSize.max, by = sampleSize.interval)
-subjects = unique(segment.data.evAct$subid)
-#adj.size = 1 #size for density width adjustment (based on density function)
-bw = 1
-sample.types <- c("sample", "random", "crossMov")
-nearestDistance <- data.frame()
-
-for (it in iterations){
-  for (movie in movieNames){
-    crossMovies <- movieNames[movieNames!=movie]
-    subjects.sameMov <- unique(segment.data.evAct$subid[segment.data.evAct$movieName == movie])
-    for (s.size in sample.sizes){
-      #select subject ids to make up sample dataset 
-      sample.subid <- sample(subjects.sameMov, size = s.size, replace = TRUE)
-      
-      #select subject ids to make up test dataset, with participants not including those in sample dataset
-      test.subid <- sample(subjects.sameMov[!subjects.sameMov %in% sample.subid], size = s.size, replace = TRUE)
-      
-      #filter dataset to include selected subjects for both sample and test data 
-      sample.data <- get.sample.dataset(sample.subid, segment.data.evAct, "bpTime", movieDur)
-      test.data <- get.sample.dataset(test.subid, segment.data.evAct, "bpTime", movieDur)
-      for (segmentGrain in segmentGrains){
-        if (segmentGrain == "c"){
-          adj.size = 0.1
-        } else {
-          adj.size = 0.05
-        }
-        
-        #filter sample and test dataset for movie and grain
-        dt.sample <- sample.data %>% filter(movieName == movie, grain == segmentGrain)
-        dt.test <- test.data %>% filter(movieName == movie, grain == segmentGrain)
-        
-        #calculate the average button press of sample dataset
-        ave.bp <- dt.sample %>% group_by(newid) %>% dplyr::summarise(bp.no = length(bpTime)) %>% dplyr::summarise(bp = mean(bp.no))
-        
-        #get nearest peak to peak distance
-        near.dist.sample <- get.peaktopeak.distance(dt.sample$bpTime, dt.test$bpTime, movieDur, adj.size, ave.bp$bp, bw)
-        near.dist.random <- get.peaktopeak.distance(dt.sample$bpTime.rand, dt.test$bpTime.rand, movieDur, adj.size, ave.bp$bp, bw)
-        
-        #calculate the nearest distance when sample is compared with segmentation of all other movies of the same sample size. 
-        neardist.crossMov <- data.frame()
-        for (crossMov in crossMovies){
-          subjects.crossMov <- unique(segment.data.evAct$subid[segment.data.evAct$movieName == crossMov])
-          crossMov.subid <- sample(subjects.crossMov, size = s.size, replace = TRUE)
-          crossMov.data <- get.sample.dataset(crossMov.subid, segment.data.evAct, "bpTime", movieDur)
-          dt.crossMov <- crossMov.data %>% filter(movieName == crossMov, grain == segmentGrain)
-          neardist.crossMov <- rbind(neardist.crossMov, get.peaktopeak.distance(dt.sample$bpTime, dt.crossMov$bpTime, movieDur, adj.size, ave.bp$bp, bw)) 
-        }
-        near.dist.crossMov <- as.data.frame.list(colMeans(neardist.crossMov))
-        
-        #Put nearest distance into dataframes for saving 
-        for (sample.type in sample.types){
-          assign("near.dist", get(paste("near.dist.", sample.type, sep = "")))
-          nearestDistance <- rbind(nearestDistance, data.frame(Iteration = it, sampleSize = s.size, movieName = movie, grain = segmentGrain, testCond = sample.type, nearestDistance = near.dist$nearestDistance, nPeaks_sample = near.dist$sample_nPeaks, ave_samplePeakInterval = near.dist$ave_samplePeakInterval, sd_samplePeakInterval = near.dist$sd_samplePeakInterval, mPeaks_test = near.dist$test_nPeaks, ave_testPeakInterval = near.dist$ave_testPeakInterval, sd_testPeakInterval = near.dist$sd_testPeakInterval))
-      }
-      
-     }
-    }
-  }
-  print(it)
-}
-
-peaktopeak.evAct.plot <- plotAgreementValues(nearestDistance, "nearestDistance", "Peak-to-peak distance (s)")
-  
-# setwd('../data/bootstrapped')
-# write.table(nearestDistance,"esMethods_PeakPeakDistance_c0.1_f0.05_100Iterations_evAct.txt", sep="\t",row.names=FALSE)
-```
-
 **Peakiness**
-Peakiness represents the degree of group agreement on both boundary and non-boundary periods throughout the duration of the movie. Peakiness is measured by calculating rugosity - a measure of surface roughness typically used by marine biologist to measure the contours of coral reef. Broadly, peakiness is calculated by measuring the total length of the segmentation density distribution, following its contours (i.e. end to end distance following every peak and trough) over the total duration of the movie. This peakiness value is then divided with the minimum peakiness (when group button press is distributed uniformly over movie length). 
-
+Peakiness represents the degree of within group agreement on both boundary and non-boundary periods throughout the duration of the movie. Peakiness is measured by calculating rugosity - a measure of surface roughness typically used by marine biologist to measure the contours of coral reef. Broadly, peakiness is calculated by measuring the total length of the segmentation density distribution, following its contours (i.e. end to end distance following every peak and trough) over the total duration of the movie. This peakiness value is then divided with the minimum peakiness (when group button press is distributed uniformly over movie length).
 
 *commercial films*
 ```{r getEssentials_commercial}
-movieDur <- 566 
+movieDur <- movieDur.commercial
 movieNames <- as.character(unique(segment.data.commercial$movieName))
 segmentGrains <- as.character(unique(segment.data.commercial$grain))
 ```
@@ -369,12 +213,19 @@ segmentGrains <- as.character(unique(segment.data.commercial$grain))
 ```{r peakiness_commercial}
 iterations = seq(from = 1, to = n.iterations, by = 1)
 sample.sizes = seq(from = sampleSize.min, to = sampleSize.max, by = sampleSize.interval)
-subjects = unique(segment.data.commercial$subid[segment.data.commercial$condition == "Full"]) #pooling subjects from "Full" condition only 
+subjects = unique(segment.data.commercial$subid)
 bw = 'sj'
 sample.types <- c("sample", "random")
 peakiness <- data.frame()
 
-for (it in iterations){
+#open cores for parallel processing (using maximum available cores)
+cores <- parallel::detectCores()
+cl <- makeSOCKcluster(cores)
+registerDoSNOW(cl)
+
+start.time = Sys.time()
+peakiness.comm <- foreach (it = iterations, .packages = c('dplyr', 'foreach', 'seewave'), .combine = 'rbind', .options.snow=opts) %dopar% {
+  pk <- data.frame()
   for (s.size in sample.sizes){
     sample.subid <- sample(subjects, size = s.size, replace = TRUE)
     sample.data <- get.sample.dataset(sample.subid, segment.data.commercial, "bpTime", movieDur)
@@ -387,29 +238,32 @@ for (it in iterations){
         }
         dt.sample <- sample.data %>% filter(movieName == movie, grain == segmentGrain)
         
-        rugo.sample <- get.peakiness(dt.sample$bpTime, movieDur, dt.sample$subid, adj.size, bw)
-        rugo.random <- get.peakiness(dt.sample$bpTime.rand, movieDur, dt.sample$subid, adj.size, bw)
+        rugo.sample <- get.peakiness(dt.sample$bpTime, movieDur, dt.sample$newid, adj.size, bw)
+        rugo.random <- get.peakiness(dt.sample$bpTime.rand, movieDur, dt.sample$newid, adj.size, bw)
 
         for (sample.type in sample.types){
           assign("rugo", get(paste("rugo.", sample.type, sep = "")))
-          peakiness <- rbind(peakiness, data.frame(Iteration = it, sampleSize = s.size, movieName = movie, grain = segmentGrain, testCond = sample.type, min.peakiness = rugo[1], act.peakiness = rugo[2]))
+          pk <- rbind(pk, data.frame(Iteration = it, sampleSize = s.size, movieName = movie, grain = segmentGrain, testCond = sample.type, min.rugo = rugo[1], act.rugo = rugo[2], peakiness = rugo[3]))
         }
       }
     }
   }
-  print(it)
+  return(pk)
 }
+end.time = Sys.time()
+stopCluster(cl)#close core connections
 
-peakiness.comm.plot <- plotAgreementValues(peakiness, "act.peakiness", "Peakiness")
+peakiness.comm.plot <- plotAgreementValues(peakiness.comm, "peakiness", "Peakiness")
 peakiness.comm.plot
-# setwd('../data/bootstrapped')
-# write.table(peakiness,"esMethods_Peakiness_adjust_c0.1_f0.05_100Iterations_commercial.txt", sep="\t",row.names=FALSE)
+
+setwd('../data/bootstrapped')
+write.table(peakiness.comm,"esMethods_Peakiness_adjust_c0.1_f0.05_1000Iterations_commercial.txt", sep="\t",row.names=FALSE)
 ```
 
 *Everyday activities*
 
-```{r getEssentials_commercial}
-movieDur <- 273 
+```{r getEssentials_evAct}
+movieDur <- movieDur.evAct 
 movieNames <- as.character(unique(segment.data.evAct$movieName))
 segmentGrains <- as.character(unique(segment.data.evAct$grain))
 ```
@@ -420,16 +274,20 @@ sample.sizes = seq(from = sampleSize.min, to = sampleSize.max, by = sampleSize.i
 subjects = unique(segment.data.evAct$subid)
 bw = 'sj'
 sample.types <- c("sample", "random")
-peakiness <- data.frame()
 
-for (it in iterations){
+#open cores for parallel processing (using maximum available cores)
+cores <- parallel::detectCores()
+cl <- makeSOCKcluster(cores)
+registerDoSNOW(cl)
+
+start.time = Sys.time()
+peakiness.evAct <- foreach (it = iterations, .combine = 'rbind',.errorhandling='remove', .packages = c('dplyr', 'foreach', 'seewave'), .options.snow=opts) %dopar%{
+  pk <- data.frame()
   for (movie in movieNames){
     subjects.sameMov <- unique(segment.data.evAct$subid[segment.data.evAct$movieName == movie])
     for (s.size in sample.sizes){
       #select subject ids to make up sample dataset 
       sample.subid <- sample(subjects.sameMov, size = s.size, replace = TRUE)
-      
-      #filter dataset to include selected subjects for both sample and test data 
       sample.data <- get.sample.dataset(sample.subid, segment.data.evAct, "bpTime", movieDur)
       for (segmentGrain in segmentGrains){
         if (segmentGrain == 'c'){
@@ -438,47 +296,417 @@ for (it in iterations){
           adj.size = 0.05
         }
         
-        #filter sample and test dataset for movie and grain
+        #filter sample dataset for movie and grain
         dt.sample <- sample.data %>% filter(movieName == movie, grain == segmentGrain)
         
-        #get nearest peak to peak distance
-        rugo.sample <- get.peakiness(dt.sample$bpTime, movieDur, dt.sample$subid, adj.size,bw)
-        rugo.random <- get.peakiness(dt.sample$bpTime.rand, movieDur, dt.sample$subid, adj.size,bw)
+        #get rugosity values
+        rugo.sample <- get.peakiness(dt.sample$bpTime, movieDur, dt.sample$newid, adj.size,bw)
+        rugo.random <- get.peakiness(dt.sample$bpTime.rand, movieDur, dt.sample$newid, adj.size,bw)
         
-        #Put nearest distance into dataframes for saving 
+        #Put rugosity and peakiness values into dataframes for saving 
         for (sample.type in sample.types){
           assign("rugo", get(paste("rugo.", sample.type, sep = "")))
-          peakiness <- rbind(peakiness, data.frame(Iteration = it, sampleSize = s.size, movieName = movie, grain = segmentGrain, testCond = sample.type, min.peakiness = rugo[1], act.peakiness = rugo[2]))
+          pk <- rbind(pk, data.frame(Iteration = it, sampleSize = s.size, movieName = movie, grain = segmentGrain, testCond = sample.type, min.rugo = rugo[1], act.rugo = rugo[2], peakiness = rugo[3]))
       }
       
      }
     }
   }
-  print(it)
+  return(pk)
 }
+end.time = Sys.time()
+stopCluster(cl)#close core connections
 
-peakiness.evAct.plot <- plotAgreementValues(peakiness, "act.peakiness", "Peakiness")
+peakiness.evAct.plot <- plotAgreementValues(peakiness.evAct, "peakiness", "Peakiness") + coord_cartesian(ylim = c(0,60))
 peakiness.evAct.plot
 
-# setwd('../data/bootstrapped')
-# write.table(peakiness,"esMethods_Peakiness_adjust_c0.1_f0.05_100Iterations_evAct.txt", sep="\t",row.names=FALSE)
+setwd('../data/bootstrapped')
+write.table(peakiness.evAct,"esMethods_Peakiness_adjust_c0.1_f0.05_1000Iterations_evAct.txt", sep="\t",row.names=FALSE)
 ```
 
-The subsequent two metrices: agreement and surprise index will utilise data that is structured as timeseries of button presses. These time series contain presence(1) or absence (0) of button press at every 1 second interval. 
+
+**Peak to peak distance.**
+Peak to peak distance measures how far apart are two independent groups' (sample and test groups) boundary placement in time. This measure is calculated by first estimating the density distributions of each group's segmentation data. We then extract timepoints of the highest density for each group, creating an array of peak times. For both groups, the amount of peak times extracted is based the minimum of: 1) length of peak times of sample density, 2) length of peak times of test density, or 3) the average number of boundaries identified by the sample and test groups. We subtract each sample's peak time with the test's peak time of the nearest value. We repeat this process one more time, subtracting each test's peak time with the nearest peak from sample peak times. The average of these difference values is the resultant peak to peak distance. 
+
+*Commercial*
+
+```{r peaktopeakdistance_commercial}
+iterations = seq(from = 1, to = n.iterations, by = 1)
+movieNames = unique(segment.data.commercial$movieName)
+segmentGrains = unique(segment.data.commercial$grain)
+movieDur = movieDur.commercial
+sample.sizes = seq(from = sampleSize.min, to = sampleSize.max, by = sampleSize.interval)
+subjects = unique(segment.data.commercial$subid)
+#Resultant density bandwidth = bw*adj.size
+bw = 'sj' #Recommended by R is 'sj' -> minimises mean integrated squared error
+###
+sample.types <- c("sample", "random", "crossMov")
+
+#Register cores for parallel processing 
+cores <- parallel::detectCores()
+cl <- makeSOCKcluster(cores)
+registerDoSNOW(cl)
+
+start.time = Sys.time()
+peaktopeak.distance <- foreach(it = iterations, .packages = c('dplyr', 'foreach'), .combine = 'rbind', .options.snow=opts)%dopar%{
+  nearestDistance <- data.frame()
+  for (s.size in sample.sizes){
+    sample.subid <- sample(subjects, size = s.size, replace = TRUE)
+    test.subid <- sample(subjects, size = s.size, replace = TRUE)
+    sample.data <- get.sample.dataset(sample.subid, segment.data.commercial, "bpTime", movieDur)
+    test.data <- get.sample.dataset(test.subid, segment.data.commercial, "bpTime", movieDur)
+    for (movie in movieNames){
+      crossMovie <- movieNames[movieNames!=movie]
+      for(segmentGrain in segmentGrains){
+        if (segmentGrain == 'c'){
+          adj.size = 0.1
+        } else {
+          adj.size = 0.05
+        }
+        sample.dt <- sample.data[sample.data$movieName == movie & sample.data$grain == segmentGrain,]
+        test.dt <- test.data[test.data$movieName == movie & test.data$grain == segmentGrain,]
+        crossMov.dt <- sample.data[sample.data$movieName == crossMovie & sample.data$grain == segmentGrain,]
+        
+        ave.bp.sample <- mean(tapply(sample.dt$bpTime, sample.dt$newid, length))
+        ave.bp.test <- mean(tapply(test.dt$bpTime, test.dt$newid, length))
+        ave.bp.crossMov <- mean(tapply(crossMov.dt$bpTime, crossMov.dt$newid, length))
+
+        near.dist.sample <- get.peaktopeak.distance(sample.dt$bpTime, test.dt$bpTime, movieDur, adj.size, ave.bp.sample,ave.bp.test, bw)
+        near.dist.random <- get.peaktopeak.distance(sample.dt$bpTime.rand, test.dt$bpTime.rand, movieDur, adj.size, ave.bp.sample,ave.bp.test, bw)
+        near.dist.crossMov <- get.peaktopeak.distance(sample.dt$bpTime, crossMov.dt$bpTime, movieDur, adj.size, ave.bp.sample, ave.bp.crossMov, bw)
+        
+        for (sample.type in sample.types){
+          assign("near.dist", get(paste("near.dist.", sample.type, sep = "")))
+          nearestDistance <- rbind(nearestDistance, data.frame(Iteration = it, sampleSize = s.size, movieName = movie, grain = segmentGrain, testCond = sample.type, nearestDistance = near.dist))
+        }
+      }
+    }
+  }
+  return(nearestDistance)
+}
+end.time = Sys.time()
+stopCluster(cl)#close core connections
+
+#plot figure to check trend 
+peaktopeak.comm.plot <- plotAgreementValues(peaktopeak.distance, "nearestDistance", "Peak-to-peak distance(s)")
+peaktopeak.comm.plot
+
+setwd('../data/bootstrapped')
+write.table(peaktopeak.distance,"esMethods_PeakPeakDistance_c0.1_f0.05_1000Iterations_commercial.txt", sep="\t",row.names=FALSE)
+
+```
+
+*Everyday activities*
+
+```{r peaktopeakdistance_everyday}
+#iterations = seq(from = 1, to = n.iterations, by = 1)
+iterations <- c(362)
+movieNames = unique(segment.data.evAct$movieName)
+segmentGrains = unique(segment.data.evAct$grain)
+movieDur = movieDur.evAct
+sample.sizes = seq(from = sampleSize.min, to = sampleSize.max, by = sampleSize.interval)
+subjects = unique(segment.data.evAct$subid)
+#Resultant density bandwidth = bw*adj.size
+bw = 'sj' #Recommended by R is 'sj' -> minimises mean integrated squared error
+###
+sample.types <- c("sample", "random", "crossMov")
+
+#Register cores for parallel processing 
+cores <- parallel::detectCores()
+cl <- makeSOCKcluster(cores)
+registerDoSNOW(cl)
+
+start.time = Sys.time()
+peaktopeak.distance.missing362 <- foreach(it = iterations, .packages = c('dplyr', 'foreach'), .combine = 'rbind', .errorhandling='remove', .options.snow=opts)%dopar%{
+  nearestDistance <- data.frame()
+  for(movie in movieNames){
+    crossMovies <- movieNames[movieNames!=movie]
+    subjects.sameMov <- unique(segment.data.evAct$subid[segment.data.evAct$movieName == movie])
+    for (s.size in sample.sizes){
+      #select subject ids to make up sample dataset
+      sample.subid <- sample(subjects.sameMov, size = s.size, replace = TRUE)
+      
+      #select subject ids to make up test dataset
+      test.subid <- sample(subjects.sameMov, size = s.size, replace = TRUE)
+      
+      #filter dataset to include selected subjects for both sample and test data 
+      sample.data <- get.sample.dataset(sample.subid, segment.data.evAct, "bpTime", movieDur)
+      test.data <- get.sample.dataset(test.subid, segment.data.evAct, "bpTime", movieDur)
+      for (segmentGrain in segmentGrains){
+        if (segmentGrain == "c"){
+          adj.size = 0.1
+        } else {
+          adj.size = 0.05
+        }
+        
+        #filter sample and test dataset for movie and grain
+        dt.sample <- sample.data[sample.data$movieName == movie & sample.data$grain == segmentGrain,] 
+        dt.test <- test.data[test.data$movieName == movie & test.data$grain == segmentGrain,]
+        
+        #calculate the average button press of sample and test datasets
+        ave.bp.sample <- mean(tapply(dt.sample$bpTime, dt.sample$newid, length))
+        ave.bp.test <- mean(tapply(dt.test$bpTime, dt.test$newid, length))
+
+        #get nearest peak to peak distance
+        near.dist.sample <- get.peaktopeak.distance(dt.sample$bpTime, dt.test$bpTime, movieDur, adj.size, ave.bp.sample, ave.bp.test, bw)
+        near.dist.random <- get.peaktopeak.distance(dt.sample$bpTime.rand, dt.test$bpTime.rand, movieDur, adj.size, ave.bp.sample, ave.bp.test,bw)
+        
+        #calculate the nearest distance when sample is compared with segmentation of all other movies of the same sample size. 
+        neardist.crossMov <- c()
+        for (crossMov in crossMovies){
+          subjects.crossMov <- unique(segment.data.evAct$subid[segment.data.evAct$movieName == crossMov])
+          crossMov.subid <- sample(subjects.crossMov, size = s.size, replace = TRUE)
+          crossMov.data <- get.sample.dataset(crossMov.subid, segment.data.evAct, "bpTime", movieDur)
+          dt.crossMov <- crossMov.data[crossMov.data$movieName == crossMov & crossMov.data$grain == segmentGrain,] 
+          ave.bp.crossMov <- mean(tapply(dt.crossMov$bpTime, dt.crossMov$newid, length))
+          neardist.crossMov <- rbind(neardist.crossMov, get.peaktopeak.distance(dt.sample$bpTime, dt.crossMov$bpTime, movieDur, adj.size, ave.bp.sample,ave.bp.crossMov, bw)) 
+        }
+        near.dist.crossMov <- colMeans(neardist.crossMov)
+        
+        #Put nearest distance into dataframes for saving 
+        for (sample.type in sample.types){
+          assign("near.dist", get(paste("near.dist.", sample.type, sep = "")))
+          nearestDistance <- rbind(nearestDistance, data.frame(Iteration = it, sampleSize = s.size, movieName = movie, grain = segmentGrain, testCond = sample.type, nearestDistance = near.dist))
+      }
+     }
+    }
+  }
+  return(nearestDistance)
+}
+end.time = Sys.time()
+
+#plot figure to check trend 
+peaktopeak.evAct.plot <- plotAgreementValues(peaktopeak.distance, "nearestDistance", "Peak-to-peak distance(s)")
+peaktopeak.evAct.plot
+
+setwd('../data/bootstrapped')
+write.table(peaktopeak.distance,"esMethods_PeakPeakDistance_c0.1_f0.05_1000Iterations_evAct.txt", sep="\t",row.names=FALSE)
+
+```
+
+**Surprise Index**
+
+Surprise represents the extent to which the expected overlap between individual's button presses and an independent group's normative boundaries is exceeded. This measure is adapted from Katori et al., 2018. First for one participant, we calculate the frequency of overlap (fell within 1s window centered on group normative boundary) between participant's button press time with the rest of the sample's button press times (n). Rest of samples button press times is calculated by first calculating the density estimate of the group's button button press and extracting the times of n-highest density values, where n = average number of button press for the group (or the maximum number of peak). 
+Next we calculate the expected value of button press overlap between individual to the rest of sample (following poisson distribution): 
+Poverlap = e^-(lambda)*(lambda/n!) 
+Where lambda = frequency of individual segmentation x frequency of rest of sample segmentation x number of bins (movie duration)
+
+Surprise index is then calculated as: -log2*Sum(Poverlap from n - N), where N = maximum potential number of overlap, defined as maximum duration of movie in seconds. 
+
+*Commercial movies*
+
+```{r getEssentials_commercial}
+movieDur <- movieDur.commercial 
+movieNames <- as.character(unique(segment.data.commercial$movieName))
+segmentGrains <- as.character(unique(segment.data.commercial$grain))
+```
+
+```{r surpriseIndex_commercial}
+iterations = seq(from = 1, to = n.iterations, by = 1)
+sample.sizes = seq(from = sampleSize.min, to = sampleSize.max, by = sampleSize.interval)
+subjects = unique(segment.data.commercial$subid)
+sample.types <- c("sample", "random", "crossMov")
+bw = 'sj'
+t.window = 1 #window in of overlap between individual button press time and normative boundary. 
+
+#Register cores for parallel processing 
+cores <- parallel::detectCores()
+cl <- makeSOCKcluster(cores)
+registerDoSNOW(cl)
+
+start.time = Sys.time()
+surprise.index <- foreach(it = iterations, .combine = 'rbind',
+                           .packages = c('dplyr', 'foreach'), .options.snow=opts)%dopar%{
+                             sp.index <- data.frame()
+                             for (s.size in sample.sizes){
+    sample.subid <- sample(subjects, size = s.size, replace = TRUE)
+    sample.data <- get.sample.dataset(sample.subid, segment.data.commercial, "bpTime", movieDur)
+    for (movie in movieNames){
+      crossMovie <- movieNames[movieNames!=movie]
+      for(segmentGrain in segmentGrains){
+        if(segmentGrain == 'c'){
+          adj.size = 0.1
+        } else {
+          adj.size = 0.05
+        }
+        #filter datasets for based on movie and grain
+        dt.sample <- sample.data %>% filter(movieName == movie, grain == segmentGrain)
+        dt.crossMov <- sample.data %>% filter(movieName == crossMovie, grain == segmentGrain)
+        
+        #create empty variables for surprise index of each subject in dt
+        surprise.sample <- NULL
+        surprise.random <- NULL
+        surprise.crossMov <- NULL
+        for (subject in unique(dt.sample$newid)){
+          
+          #calculate surprise index for subject and rest of sample 
+          subject.bp <- dt.sample$bpTime[dt.sample$newid == subject]
+          group.bp <- dt.sample$bpTime[dt.sample$newid != subject]
+          ave.bp <- mean(tapply(dt.sample$bpTime[dt.sample$newid!=subject], dt.sample$newid[dt.sample$newid != subject], length))
+          surprise.sample <- rbind(surprise.sample, get.surprise.index(subject.bp, group.bp, movieDur, ave.bp, bw, adj.size, t.window))
+          
+          #calculate surprise index for subject's random segmentation with sample's random segmentation
+          subject.bp.rand <- dt.sample$bpTime.rand[dt.sample$newid == subject]
+          group.bp.rand <- dt.sample$bpTime.rand[dt.sample$newid != subject]
+          surprise.random <- rbind(surprise.random,  get.surprise.index(subject.bp.rand, group.bp.rand, movieDur, ave.bp, bw, adj.size, t.window))
+          
+          surprise.random <- rbind(surprise.random, get.surprise.index(subject.bp.rand, group.bp.rand, movieDur, ave.bp, bw, adj.size, t.window))
+          
+          #calculate agreement index for subject's segmentation vs sample's segmentation of the other movie
+          crossMov.bp <- dt.crossMov$bpTime
+          ave.bp.crossMov <- mean(tapply(dt.crossMov$bpTime, dt.crossMov$newid, length))
+          surprise.crossMov <- rbind(surprise.crossMov, get.surprise.index(subject.bp, crossMov.bp, movieDur, ave.bp.crossMov, bw, adj.size, t.window))
+        }
+        #average surprise index and organise in dataframe
+        for (sample.type in sample.types){
+          assign("surprise", get(paste("surprise.", sample.type, sep = "")))
+          sp.index <- rbind(sp.index, data.frame(Iteration = it, sampleSize = s.size, movieName = movie, grain = segmentGrain, testCond = sample.type, surpriseIndex = mean(surprise)))
+        }
+      }
+    }
+  }
+  return(sp.index)
+}
+end.time = Sys.time()
+
+surprise.comm.plot <- plotAgreementValues(surprise.index, "surpriseIndex", "Surprise Index")
+surprise.comm.plot
+
+setwd('../data/bootstrapped')
+write.table(surprise.index,"esMethods_SurpriseIndex_c0.1_f0.05_1000Iterations_commercial.txt", sep="\t",row.names=FALSE)
+```
+
+*Everyday activities*
+
+```{r getEssentials_everydayActivities}
+movieDur <- 273 
+movieNames <- as.character(unique(segment.data.evAct$movieName))
+segmentGrains <- as.character(unique(segment.data.evAct$grain))
+```
+
+```{r surpriseIndex_everydayActivities}
+iterations = seq(from = 1, to = n.iterations, by = 1)
+sample.sizes = seq(from = sampleSize.min, to = sampleSize.max, by = sampleSize.interval)
+sample.types <- c("sample", "random", "crossMov")
+bw = 'sj'
+t.window = 1
+
+#function to convert multiple dataframe value types 
+convert.magic <- function(obj,types){
+    for (i in 1:length(obj)){
+        FUN <- switch(types[i],character = as.character, 
+                                   numeric = as.numeric, 
+                                   factor = as.factor)
+        obj[,i] <- FUN(obj[,i])
+    }
+    obj
+}  
+
+df.colnames <- c("surpriseIndex", "testCond", "grain", "movieName", "Iteration", "sampleSize")
+df.types <- c("numeric", "factor", "factor", "factor", "factor", "factor")
+
+#open cores for parallel processing
+cores <- parallel::detectCores()
+cl <- makeSOCKcluster(cores)
+registerDoSNOW(cl)
+
+start.time = Sys.time()
+surprise.index <- foreach(it = iterations, .combine = 'rbind',.errorhandling='remove',
+                           .packages = c('dplyr', 'foreach'), .options.snow=opts)%dopar%{
+  #parent function to loop through every sample size
+  get.sample.surprise <- function(s.size){
+    
+    #parent function to loop through every movie & grain
+    get.movie.surprise <- function(movie){
+      crossMovie <- unique(movieNames[movieNames!=movie])
+      
+      sample.subid <- sample(unique(segment.data.evAct$subid[segment.data.evAct$movieName == movie]), size = s.size, replace = TRUE)
+
+      sample.data <- get.sample.dataset(sample.subid, segment.data.evAct, "bpTime", movieDur)
+      
+      #Define functions to call in iteration
+      get.surprise <- function(id){
+        #get subject data
+        subject.dt <- sample.data[sample.data$newid == id & sample.data$movieName == movie,]
+        
+        #get group data - resample with replacement for every subject to exclude subject
+        group.subjects <- unique(sample.data$newid)[unique(sample.data$newid)!=id]
+        group.dt <- do.call(rbind, lapply(group.subjects, function(s){
+          gp.dt <- sample.data[sample.data$newid == s & sample.data$movieName == movie,] 
+          return(gp.dt)
+        }))
+        
+        #get crossMovie data 
+        crossMov.dt <- do.call(rbind, lapply(crossMovie, function(crossmov){
+          cm.subjects <- sample(unique(segment.data.evAct$subid[segment.data.evAct$movieName == crossmov]), size = s.size, replace = TRUE)
+          cm.dt <- get.sample.dataset(cm.subjects, segment.data.evAct, "bpTime", movieDur) %>% dplyr::filter(movieName == crossmov)
+          return(cm.dt)
+        }))
+        
+        get.surprise.each.grain <- function(g){
+          if (g == 'c'){
+            adj.size = 0.1
+          } else {
+            adj.size = 0.05}
+          
+          sub.bp <- subject.dt$bpTime[subject.dt$grain == g]
+          gp.bp <- group.dt$bpTime[group.dt$grain == g]
+          ave.bp <- group.dt[group.dt$grain == g,] %>% dplyr::group_by(newid) %>% dplyr::summarise(bp = length(bpTime)) %>% dplyr::summarise(ave.bp = mean(bp))
+          sample.surprise <- c(get.surprise.index(sub.bp, gp.bp, movieDur, ave.bp$ave.bp, bw, adj.size, t.window), "sample", g, movie, it, s.size)
+          
+          sub.bp.rand <- subject.dt$bpTime.rand[subject.dt$grain == g]
+          gp.bp.rand <- group.dt$bpTime.rand[group.dt$grain == g]
+          random.surprise <- c(get.surprise.index(sub.bp.rand, gp.bp.rand, movieDur, ave.bp$ave.bp, bw, adj.size, t.window), "random", g, movie, it, s.size)
+          
+          crossmov.surprise <- c(colMeans(do.call(rbind, lapply(crossMovie, function(crossmov){
+            cm.dt <- crossMov.dt[crossMov.dt$movieName == crossmov,]
+            crossmov.bp <- cm.dt$bpTime[cm.dt$grain == g]
+            crossmov.bp.ave <- crossMov.dt[crossMov.dt$grain == g,] %>% dplyr::group_by(newid) %>% dplyr::summarise(bp = length(bpTime)) %>% dplyr::summarise(ave.bp = mean(bp))
+            return(get.surprise.index(sub.bp, crossmov.bp, movieDur, crossmov.bp.ave$ave.bp, bw, adj.size, t.window))
+          }))), "crossMovie", g, movie, it, s.size)
+        
+          return(rbind(sample.surprise, random.surprise, crossmov.surprise))
+        }
+        return(do.call(rbind, lapply(unique(subject.dt$grain), get.surprise.each.grain)))
+      }
+      return(do.call(rbind, lapply(unique(sample.data$newid), get.surprise)))
+    }
+    return(do.call(rbind, lapply(movieNames, get.movie.surprise)))
+  }
+  return(do.call(rbind, lapply(sample.sizes, get.sample.surprise)))
+}
+end.time <- Sys.time()
+stopCluster(cl)#close core connections
+
+sp.index <- as.data.frame(surprise.index) 
+colnames(sp.index) <- df.colnames
+sp.index <- convert.magic(sp.index, df.types)
+
+sp.index$sampleSize <- factor(sp.index$sampleSize, levels = sample.sizes)
+sp.index <- sp.index %>% dplyr::group_by(Iteration, sampleSize, movieName, testCond, grain) %>% 
+  dplyr::summarise(surpriseIndex = mean(surpriseIndex))
+
+surprise.evAct.plot <- plotAgreementValues(sp.index, "surpriseIndex", "Surprise Index")
+surprise.evAct.plot
+
+setwd('../data/bootstrapped')
+write.table(sp.index,"esMethods_SurpriseIndex_c0.1_f0.05_1000Iterations_evAct601to1000.txt", sep="\t",row.names=FALSE)
+```
+
+The subsequent metrices: agreement index, predictive value, and detection accuracy will utilise data that is structured as timeseries of button presses. These time series contain presence(1) or absence (0) of button press at every 1 second interval. 
 
 *Load timeseries dataset*
 ```{r loadTimeseries}
 setwd('../data/raw')
-ts.data.commercial <- read.delim("esMethods_Commercial_TimeSeries.txt", head = TRUE)
-ts.data.evAct <- read.delim("esMethods_EvAct_TimeSeries.txt", head = TRUE)
+ts.data.commercial <- read.delim("esMethods_Commercial_TimeSeries_Filtered.txt", head = TRUE)
+ts.data.evAct <- read.delim("esMethods_EvAct_TimeSeries_Filtered.txt", head = TRUE)
 names(ts.data.commercial)[names(ts.data.commercial) == "movName"] <- "movieName"
 names(ts.data.evAct)[names(ts.data.evAct) == "movName"] <- "movieName"
 ```
 
 **Agreement Index**
 
-Agreement index measures the correlation between individual segmentation behaviour with the rest of the sample (Zacks et al., 2006). Each subject's segmentation data were converted into a time series binned every 1 second. For each second, presence of button press was coded as 1 and absence of button press was coded as 0. For the remaining group's segmentation data, each second of the time series would contain the proportion of participants who coded that second as containing a boundary. Correlation between each participant's timeseries with the rest of the sample were correlated and divided by the difference between the maximum and minimum correlation possible (to control for individual's number of button press). Maximum correlation was calculate by ordering both participant's and rest of group's timeseries in descending order and then computing the correlation (perfect correlation). Minimum correlaion was calculated by ordering participant's timeseries in descending order while ordering the group's timeseries in ascending order and then computing the correlation (perfect anti-correlation). 
-
+Agreement index measures the correlation between individual segmentation behaviour with the rest of the sample (Zacks et al., 2006). Each subject's segmentation data were converted into a time series binned every 1 second. For each second, presence of button press was coded as 1 and absence of button press was coded as 0. For the remaining group's segmentation data, each second of the time series would contain the proportion of participants who coded that second as containing a boundary. Correlation between each participant's timeseries with the rest of the sample were calculated and divided by the difference between the maximum and minimum correlation possible (to control for individual's number of button press). Maximum correlation was calculate by ordering both participant's and rest of group's timeseries in descending order and then computing the correlation (perfect correlation). Minimum correlation was calculated by ordering participant's timeseries in descending order while ordering the group's timeseries in ascending order and then computing the correlation (perfect anti-correlation). 
 
 *Commercial movies*
 
@@ -488,15 +716,20 @@ movieNames <- as.character(unique(segment.data.commercial$movieName))
 segmentGrains <- as.character(unique(segment.data.commercial$grain))
 ```
 
-
 ```{r agreementIndex_commercial}
 iterations = seq(from = 1, to = n.iterations, by = 1)
 sample.sizes = seq(from = sampleSize.min, to = sampleSize.max, by = sampleSize.interval)
-subjects = unique(ts.data.commercial$subid[ts.data.commercial$condition == "Full"])
+subjects = unique(ts.data.commercial$subid)
 sample.types <- c("sample", "random", "crossMov")
-agreement.index <- data.frame()
 
-for (it in iterations){
+#open cores for parallel processing
+cores <- parallel::detectCores()
+cl <- makeSOCKcluster(cores)
+registerDoSNOW(cl)
+
+start.time = Sys.time()
+agreement.index <- foreach (it = iterations, .packages = c('dplyr', 'foreach'),.combine = 'rbind', .options.snow=opts) %dopar%{
+  ag.index <- data.frame()
   for (s.size in sample.sizes){
     sample.subid <- sample(subjects, size = s.size, replace = TRUE)
     sample.data <- get.sample.dataset(sample.subid, ts.data.commercial, "bpPresence", movieDur)
@@ -530,19 +763,21 @@ for (it in iterations){
         #average agreement index and organise in dataframe
         for (sample.type in sample.types){
           assign("agreement", get(paste("agreement.", sample.type, sep = "")))
-          agreement.index <- rbind(agreement.index, data.frame(Iteration = it, sampleSize = s.size, movieName = movie, grain = segmentGrain, testCond = sample.type, minCorrelation = mean(agreement[,1]), maxCorrelation = mean(agreement[,2]), actCorrelation = mean(agreement[,3]), agreementIndex = mean(agreement[,4])))
+          ag.index <- rbind(ag.index, data.frame(Iteration = it, sampleSize = s.size, movieName = movie, grain = segmentGrain, testCond = sample.type, minCorrelation = mean(agreement[,1]), maxCorrelation = mean(agreement[,2]), actCorrelation = mean(agreement[,3]), agreementIndex = mean(agreement[,4])))
         }
       }
     }
   }
-  print(it)
+  return(ag.index)
 }
+end.time = Sys.time()
+stopCluster(cl)#close core connections
 
 agreement.comm.plot <- plotAgreementValues(agreement.index, "agreementIndex", "Agreement Index")
 agreement.comm.plot
 
-# setwd('../data/bootstrapped')
-# write.table(agreement.index,"esMethods_AgreementIndex_100Iterations_commercial.txt", sep="\t",row.names=FALSE)
+setwd('../data/bootstrapped')
+write.table(agreement.index,"esMethods_AgreementIndex_1000Iterations_commercial.txt", sep="\t",row.names=FALSE)
 
 ```
 
@@ -554,242 +789,110 @@ movieNames <- as.character(unique(ts.data.evAct$movieName))
 segmentGrains <- as.character(unique(ts.data.evAct$grain))
 ```
 
-```{r peaktopeakdistance_evAct}
-iterations = seq(from = 1, to = n.iterations, by = 1)
-sample.sizes = seq(from = sampleSize.min, to = sampleSize.max, by = sampleSize.interval)
-subjects = unique(segment.data.evAct$subid)
-sample.types <- c("sample", "random", "crossMov")
-#agreement.index <- data.frame()
+```{r agreementIndex_evAct}
+###
+#function to convert multiple dataframe value types 
+convert.magic <- function(obj,types){
+    for (i in 1:length(obj)){
+        FUN <- switch(types[i],character = as.character, 
+                                   numeric = as.numeric, 
+                                   factor = as.factor)
+        obj[,i] <- FUN(obj[,i])
+    }
+    obj
+}  
 
-for (it in iterations){
-  for (movie in movieNames){
-    crossMovies <- movieNames[movieNames!=movie]
-    subjects.sameMov <- unique(ts.data.evAct$subid[ts.data.evAct$movieName == movie])
-    for (s.size in sample.sizes){
-      #select subject ids to make up sample dataset 
-      sample.subid <- sample(subjects.sameMov, size = s.size, replace = TRUE)
+df.colnames <- c("min.agreement", "max.agreement", "act.agreement", "agreementIndex", "testCond", "grain", "movieName", "Iteration", "sampleSize")
+df.types <- c("numeric", "numeric", "numeric", "numeric",
+                                      "factor", "factor", "factor", "factor", "factor")
+###
+  
+iterations = seq(from = 501, to = n.iterations, by = 1)
+sample.sizes = seq(from = sampleSize.min, to = sampleSize.max, by = sampleSize.interval)
+
+#open cores for parallel processing
+cores <- parallel::detectCores()
+cl <- makeSOCKcluster(cores)
+registerDoSNOW(cl)
+
+start.time = Sys.time()
+agreement.index <- foreach(it = iterations, .combine = 'rbind',
+                           .packages = c('dplyr', 'foreach'), .options.snow=opts)%dopar%{
+  #parent function to loop through every sample size
+  get.sample.agreement <- function(s.size){
+    
+    #parent function to loop through every movie & grain
+    get.movie.agreement <- function(movie){
+      crossMovie <- unique(movieNames[movieNames!=movie])
       
-      #filter dataset to include selected subjects for both sample and test data 
+      sample.subid <- sample(unique(ts.data.evAct$subid[ts.data.evAct$movieName == movie]), size = s.size, replace = TRUE)
       sample.data <- get.sample.dataset(sample.subid, ts.data.evAct, "bpPresence", movieDur)
       
-      for (segmentGrain in segmentGrains){
-        #filter sample and test dataset for movie and grain
-        ts.sample <- sample.data %>% filter(movieName == movie, grain == segmentGrain)
-
-        agreement.sample <- NULL
-        agreement.random <- NULL
-        agreement.crossMov <- NULL
-        for (subject in unique(ts.sample$newid)){
-          
-          #calculate agreement index for subject and rest of sample 
-          subject.ts <- ts.sample$subject.bp[ts.sample$newid == subject]
-          group.ts <- ts.sample %>% dplyr::filter(newid != subject) %>% dplyr::group_by(timeSeries) %>% dplyr::summarise(gp.bp = mean(subject.bp))
-          agreement.sample <- rbind(agreement.sample, get.agreement.index(subject.ts, group.ts$gp.bp))
-          
-          #calculate agreement index for subject's random segmentation with sample's random segmentation
-          subject.rand.ts <- ts.sample$subject.bp.rand[ts.sample$newid == subject]
-          group.rand.ts <- ts.sample %>% dplyr::filter(newid != subject) %>% dplyr::group_by(timeSeries) %>% dplyr::summarise(gp.bp = mean(subject.bp.rand))
-          agreement.random <- rbind(agreement.random, get.agreement.index(subject.rand.ts, group.rand.ts$gp.bp))
-          
-          #calculate agreement index for subject's segmentation vs sample's segmentation of the other movie
-          crossMov.ai <- NULL
-          for (crossMovie in crossMovies){
-            subjects.crossMov <- unique(ts.data.evAct$subid[ts.data.evAct$movieName == crossMovie])
-            crossMov.subid <- sample(subjects.crossMov, size = s.size, replace = TRUE)
-            crossMov.data <- get.sample.dataset(crossMov.subid, ts.data.evAct, "bpPresence", movieDur)
-            crossMov.ts <- crossMov.data %>% dplyr::filter(movieName == crossMovie, grain == segmentGrain) %>% dplyr::group_by(timeSeries) %>% dplyr::summarise(bp = mean(subject.bp))
-            
-            crossMov.ai <- rbind(crossMov.ai, get.agreement.index(subject.ts, crossMov.ts$bp))
-          }
-          agreement.crossMov <- rbind(agreement.crossMov, colMeans(x = crossMov.ai))
-        }
+      #Define functions to call in iteration
+      get.agreement <- function(id){
+        #get subject data
+        subject.dt <- sample.data[sample.data$newid == id & sample.data$movieName == movie,] %>% dplyr::group_by(grain) %>% dplyr::mutate(subject.bp.rand = sample(subject.bp)) %>% ungroup()
         
-        #average agreement index and organise it in dataframe 
-        for (sample.type in sample.types){
-          assign("agreement", get(paste("agreement.", sample.type, sep = "")))
-          agreement.index <- rbind(agreement.index, data.frame(Iteration = it, sampleSize = s.size, movieName = movie, grain = segmentGrain, testCond = sample.type, minCorrelation = mean(agreement[,1]), maxCorrelation = mean(agreement[,2]), actCorrelation = mean(agreement[,3]), agreementIndex = mean(agreement[,4])))
-      }
-      
-     }
-    }
-  }
-  print(it)
-}
-
-agreement.evAct.plot <- plotAgreementValues(agreement.index, "agreementIndex", "Agreement Index")
-agreement.evAct.plot 
-# setwd('../data/bootstrapped')
-# write.table(agreement.index,"esMethods_AgreementIndex_100Iterations_evAct.txt", sep="\t",row.names=FALSE)
-```
-
-
-**Surprise Index**
-
-Surprise represents how often do individual's boundary identification coincides with the rest of the group's. This measure is adapted from Katori et al., 2018. First for one participant, we calculate the frequency of overlap between participant's button press time with the rest of the sample's button press times (n). Rest of samples button press times is calculated by first calculating the density estimate of the group's button button press and extracting the times of n-highest density values, where n = average number of button press for the group. 
-Next we calculate the expected value of button press overlap between individual to the rest of sample: 
-Poverlap = e^-(lambda)*(lambda/n!)
-Where lambda = frequency of individual segmentation x frequency of rest of sample segmentation x number of bins (movie duration)
-
-Surprise index is then calculated as: -log2*Poverlap
-
-*Commercial movies*
-
-```{r getEssentials_commercial}
-movieDur <- 566 
-movieNames <- as.character(unique(ts.data.commercial$movieName))
-segmentGrains <- as.character(unique(ts.data.commercial$grain))
-```
-
-```{r surpriseIndex_commercial}
-iterations = seq(from = 1, to = n.iterations, by = 1)
-sample.sizes = seq(from = sampleSize.min, to = sampleSize.max, by = sampleSize.interval)
-subjects = unique(ts.data.commercial$subid[ts.data.commercial$condition == "Full"])
-sample.types <- c("sample", "random", "crossMov")
-surprise.index <- data.frame()
-bw = 'sj'
-
-for (it in iterations){
-  for (s.size in sample.sizes){
-    sample.subid <- sample(subjects, size = s.size, replace = TRUE)
-    sample.data <- get.sample.dataset(sample.subid, segment.data.commercial, "bpTime", movieDur)
-    for (movie in movieNames){
-      crossMovie <- movieNames[movieNames!=movie]
-      for(segmentGrain in segmentGrains){
-        if(segmentGrain == 'c'){
-          adj.size = 0.1
-        } else {
-          adj.size = 0.05
-        }
-        #filter datasets for based on movie and grain
-        dt.sample <- sample.data %>% filter(movieName == movie, grain == segmentGrain)
-        dt.crossMov <- sample.data %>% filter(movieName == crossMovie, grain == segmentGrain)
+        #get group data - resample with replacement for every subject to exclude subject
+        group.subjects <- unique(sample.data$newid)[unique(sample.data$newid)!=id]
+        group.dt <- do.call(rbind, lapply(group.subjects, function(s){
+          gp.dt <- sample.data[sample.data$newid == s & sample.data$movieName == movie,] %>% dplyr::group_by(grain) %>% dplyr::mutate(subject.bp.rand = sample(subject.bp)) %>% ungroup()
+          return(gp.dt)
+        }))
         
-        #create empty variables for agreement index of each subject in dt
-        surprise.sample <- NULL
-        surprise.random <- NULL
-        surprise.crossMov <- NULL
-        for (subject in unique(dt.sample$newid)){
-          
-          #calculate surprise index for subject and rest of sample 
-          subject.bp <- dt.sample %>% dplyr::filter(newid == subject) %>% dplyr::select(bpTime)
-          sub.bp <- unique(floor(subject.bp$bpTime))
-          group.bp <- dt.sample %>% dplyr::filter(newid != subject) %>% dplyr::select(bpTime)
-          ave.bp <- dt.sample %>% dplyr::filter(newid != subject) %>% dplyr::group_by(newid) %>% dplyr::summarise(bp = length(bpTime)) %>% dplyr::summarise(ave.bp = mean(bp))
-          surprise.sample <- rbind(surprise.sample, get.surprise.index(sub.bp, group.bp$bpTime, movieDur, ave.bp$ave.bp, bw, adj.size))
-          
-          #calculate surprise index for subject's random segmentation with sample's random segmentation
-          subject.rand.bp <-dt.sample %>% dplyr::filter(newid == subject) %>% dplyr::select(bpTime.rand)
-          sub.bp.rand <- unique(floor(subject.rand.bp$bpTime.rand))
-          group.rand.bp <- dt.sample %>% dplyr::filter(newid != subject) %>% dplyr::select(bpTime.rand)
-          surprise.random <- rbind(surprise.random, get.surprise.index(sub.bp.rand, group.rand.bp$bpTime.rand, movieDur, ave.bp$ave.bp, bw, adj.size))
-          
-          #calculate agreement index for subject's segmentation vs sample's segmentation of the other movie
-          crossMov.bp <- dt.crossMov %>% dplyr::select(bpTime)
-          ave.bp.crossMov <- dt.crossMov %>% dplyr::group_by(newid) %>% dplyr::summarise(bp = length(bpTime)) %>% dplyr::summarise(ave.bp = mean(bp))
-          surprise.crossMov <- rbind(surprise.crossMov, get.surprise.index(sub.bp, crossMov.bp$bpTime, movieDur, ave.bp.crossMov$ave.bp, bw, adj.size))
-        }
-        #average agreement index and organise in dataframe
-        for (sample.type in sample.types){
-          assign("surprise", get(paste("surprise.", sample.type, sep = "")))
-          surprise.index <- rbind(surprise.index, data.frame(Iteration = it, sampleSize = s.size, movieName = movie, grain = segmentGrain, testCond = sample.type, surpriseIndex = mean(surprise)))
-        }
-      }
-    }
-  }
-  print(it)
-}
-
-surprise.comm.plot <- plotAgreementValues(surprise.index, "surpriseIndex", "Surprise Index")
-surprise.comm.plot
-
-# setwd('../data/bootstrapped')
-# write.table(surprise.index,"esMethods_SurpriseIndex_c0.1_f0.05_100Iterations_commercial.txt", sep="\t",row.names=FALSE)
-```
-
-
-*Everyday activities*
-
-```{r getEssentials_everydayActivities}
-movieDur <- 273 
-movieNames <- as.character(unique(ts.data.evAct$movieName))
-segmentGrains <- as.character(unique(ts.data.evAct$grain))
-```
-
-```{r surpriseIndex_everydayActivities}
-iterations = seq(from = 1, to = n.iterations, by = 1)
-sample.sizes = seq(from = sampleSize.min, to = sampleSize.max, by = sampleSize.interval)
-sample.types <- c("sample", "random", "crossMov")
-surprise.index <- data.frame()
-
-for (it in iterations){
-  for (movie in movieNames){
-    crossMovies <- movieNames[movieNames!=movie]
-    subjects.sameMov <- unique(ts.data.evAct$subid[ts.data.evAct$movieName == movie])
-    for (s.size in sample.sizes){
-      #select subject ids to make up sample dataset 
-      sample.subid <- sample(subjects.sameMov, size = s.size, replace = TRUE)
-      
-      #filter dataset to include selected subjects for both sample and test data 
-      sample.data <- get.sample.dataset(sample.subid, segment.data.evAct, "bpTime", movieDur)
-      
-      for (segmentGrain in segmentGrains){
-        if (segmentGrain == 'c'){
-          adj.size = 0.1
-        } else {
-          adj.size = 0.05
-        }
-        #filter sample and test dataset for movie and grain
-        ts.sample <- sample.data %>% filter(movieName == movie, grain == segmentGrain)
-
-        surprise.sample <- NULL
-        surprise.random <- NULL
-        surprise.crossMov <- NULL
-        for (subject in unique(ts.sample$newid)){
-          
-          #calculate surprise index for subject and rest of sample 
-          subject.bp <- ts.sample$bpTime[ts.sample$newid == subject]
-          sub.bp <- unique(floor(subject.bp))
-          group.bp <- ts.sample %>% dplyr::filter(newid != subject) %>% dplyr::select(bpTime)
-          ave.bp <- ts.sample %>% dplyr::filter(newid != subject) %>% dplyr::group_by(newid) %>% dplyr::summarise(bp = length(bpTime)) %>% summarise(ave.bp = mean(bp))
-          surprise.sample <- rbind(surprise.sample, get.surprise.index(sub.bp, group.bp$bpTime, movieDur, ave.bp$ave.bp, bw, adj.size))
-          
-          #calculate surprise index for subject's random segmentation with sample's random segmentation
-          subject.rand.bp <- ts.sample$bpTime.rand[ts.sample$newid == subject]
-          sub.bp.rand <- unique(floor(subject.rand.bp))
-          group.rand.bp <- ts.sample %>% dplyr::filter(newid != subject) %>% dplyr::select(bpTime.rand)
-          surprise.random <- rbind(surprise.random, get.surprise.index(sub.bp.rand, group.rand.bp$bpTime.rand, movieDur, ave.bp$ave.bp, bw, adj.size))
-          
-          #calculate surprise index for subject's segmentation vs sample's segmentation of the other movie
-          crossMov.si <- NULL
-          for (crossMovie in crossMovies){
-            subjects.crossMov <- unique(ts.data.evAct$subid[ts.data.evAct$movieName == crossMovie])
-            crossMov.subid <- sample(subjects.crossMov, size = s.size, replace = TRUE)
-            crossMov.data <- get.sample.dataset(crossMov.subid, segment.data.evAct, "bpTime", movieDur)
-            crossMov.bp <- crossMov.data %>% dplyr::filter(movieName == crossMovie, grain == segmentGrain) %>% dplyr::select(bpTime)
-            ave.bp.crossMov <- crossMov.data %>% dplyr::filter(movieName == crossMovie, grain == segmentGrain) %>% group_by(newid) %>% dplyr::summarise(bp = length(bpTime)) %>% dplyr::summarise(ave.bp = mean(bp))
-            
-            crossMov.si <- rbind(crossMov.si, get.surprise.index(sub.bp, crossMov.bp$bpTime, movieDur, ave.bp.crossMov$ave.bp, bw, adj.size))
-          }
-          surprise.crossMov <- rbind(surprise.crossMov, colMeans(x = crossMov.si))
-        }
+        #get crossMovie data 
+        crossMov.dt <- do.call(rbind, lapply(crossMovie, function(crossmov){
+          cm.subjects <- sample(unique(ts.data.evAct$subid[ts.data.evAct$movieName == crossmov]), size = s.size, replace = TRUE)
+          cm.dt <- get.sample.dataset(cm.subjects, ts.data.evAct, "bpPresence", movieDur) %>% dplyr::filter(movieName == crossmov)
+          return(cm.dt)
+        }))
         
-        #average surprise index and organise it in dataframe 
-        for (sample.type in sample.types){
-          assign("surprise", get(paste("surprise.", sample.type, sep = "")))
-          surprise.index <- rbind(surprise.index, data.frame(Iteration = it, sampleSize = s.size, movieName = movie, grain = segmentGrain, testCond = sample.type, surpriseIndex = mean(surprise)))
+        get.agreement.each.grain <- function(g){
+          sub.ts <- subject.dt$subject.bp[subject.dt$grain == g]
+          gp.ts <- tapply(group.dt$subject.bp[group.dt$grain == g],
+                          group.dt$timeSeries[group.dt$grain == g], mean)
+          sample.agreement <- c(get.agreement.index(sub.ts, gp.ts), "sample", g, movie, it, s.size)
+          
+          sub.ts.rand <- subject.dt$subject.bp.rand[subject.dt$grain == g]
+          gp.ts.rand <- tapply(group.dt$subject.bp.rand[group.dt$grain == g],
+                               group.dt$timeSeries[group.dt$grain == g], mean)
+          random.agreement <- c(get.agreement.index(sub.ts.rand, gp.ts.rand), "random", g, movie, it, s.size)
+          
+          crossmov.agreement <- c(colMeans(do.call(rbind, lapply(crossMovie, function(crossmov){
+            cm.dt <- crossMov.dt[crossMov.dt$movieName == crossmov,]
+            crossmov.ts <- tapply(cm.dt$subject.bp[cm.dt$grain == g], 
+                                 cm.dt$timeSeries[cm.dt$grain == g], mean)
+            return(get.agreement.index(sub.ts, crossmov.ts))
+          }))), "crossMovie", g, movie, it, s.size)
+        
+          return(rbind(sample.agreement, random.agreement, crossmov.agreement))
+        }
+        return(do.call(rbind, lapply(unique(subject.dt$grain), get.agreement.each.grain)))
       }
-      
-     }
+      return(do.call(rbind, lapply(unique(sample.data$newid), get.agreement)))
     }
+    return(do.call(rbind, lapply(movieNames, get.movie.agreement)))
   }
-  print(it)
+  return(do.call(rbind, lapply(sample.sizes, get.sample.agreement)))
 }
+end.time <- Sys.time()
+stopCluster(cl)#close core connections
 
-surprise.evAct.plot <- plotAgreementValues(surprise.index, "surpriseIndex", "Surprise Index")
-surprise.evAct.plot
-  
-# setwd('../data/bootstrapped')
-# write.table(surprise.index,"esMethods_SurpriseIndex_c0.1_f0.05_100Iterations_evAct.txt", sep="\t",row.names=FALSE)
+
+ag.index <- as.data.frame(agreement.index) 
+colnames(ag.index) <- df.colnames
+ag.index <- convert.magic(ag.index, df.types)
+
+ag.index$sampleSize <- factor(ag.index$sampleSize, levels = sample.sizes)
+ag.index <- ag.index %>% dplyr::group_by(Iteration, sampleSize, movieName, testCond, grain) %>% 
+  dplyr::summarise(min.agreement = mean(min.agreement), max.agreement = mean(max.agreement), act.agreement = mean(act.agreement), agreementIndex = mean(agreementIndex))
+
+agreement.evAct.plot <- plotAgreementValues(ag.index, "agreementIndex", "Agreement Index")
+agreement.evAct.plot
+
+setwd('../data/bootstrapped')
+write.table(ag.index,"esMethods_AgreementIndex_1000Iterations_evAct501to1000.txt", sep="\t",row.names=FALSE)
+
 ```
 
 **Generate parameters necessary for subsequent calculation of predictive value and detection accuracy** 
@@ -821,7 +924,14 @@ subjects = unique(ts.data.commercial$subid[ts.data.commercial$condition == "Full
 sample.types <- c("sample", "random", "crossMov")
 normative.hitRate <- data.frame()
 
-for (it in iterations){
+#open cores for parallel processing
+cores <- parallel::detectCores()
+cl <- makeSOCKcluster(cores)
+registerDoSNOW(cl)
+
+start.time = Sys.time()
+normative.hitRate <- foreach (it = iterations, .packages = c('dplyr', 'foreach'),.combine = 'rbind', .options.snow=opts) %dopar%{
+  norm.hr <- data.frame()
   for (s.size in sample.sizes){
     sample.subid <- sample(subjects, size = s.size, replace = TRUE)
     sample.data <- get.sample.dataset(sample.subid, ts.data.commercial, "bpPresence", movieDur)
@@ -861,23 +971,22 @@ for (it in iterations){
         #average agreement index and organise in dataframe
         for (sample.type in sample.types){
           assign("normativeHit", get(paste("normativeHit.", sample.type, sep = "")))
-          normative.hitRate <- rbind(normative.hitRate, data.frame(Iteration = it, sampleSize = s.size, movieName = movie, grain = segmentGrain, testCond = sample.type, normativeHit = mean(normativeHit$normativeHit), normativeFA = mean(normativeHit$normativeFA), normativeMiss = mean(normativeHit$normativeMiss), normativeCR = mean(normativeHit$normativeCR), normativePPV = mean(normativeHit$normativePPV), normativeFalsePPV = mean(normativeHit$normativeFalsePPV)))
+          norm.hr <- rbind(norm.hr, data.frame(Iteration = it, sampleSize = s.size, movieName = movie, grain = segmentGrain, testCond = sample.type, normativeHit = mean(normativeHit$normativeHit), normativeFA = mean(normativeHit$normativeFA), normativeMiss = mean(normativeHit$normativeMiss), normativeCR = mean(normativeHit$normativeCR), normativePPV = mean(normativeHit$normativePPV), normativeFalsePPV = mean(normativeHit$normativeFalsePPV)))
         }
       }
     }
   }
-  print(it)
+  return(norm.hr)
 }
+end.time = Sys.time()
+
 
 hitRate.plot <- plotAgreementValues(normative.hitRate, "normativeHit", "Hit rate")
 hitRate.plot
 
-#setwd('../data/bootstrapped')
-#write.table(normative.hitRate,"esMethods_normativeHitRate_bin_100Iterations_commercial.txt", sep="\t",row.names=FALSE)
+setwd('../data/bootstrapped')
+write.table(normative.hitRate,"esMethods_normativeHitRate_bin_1000Iterations_commercial.txt", sep="\t",row.names=FALSE)
 
 ```
-
-
-
 
 

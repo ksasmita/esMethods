@@ -1,0 +1,177 @@
+---
+title: "Calculate bootstrap statistics"
+output: html_document
+author: Karen Sasmita 
+---
+
+This script calculates the descriptive statistics (means of distribution of sample means, sd of distribution of sample means, population standard deviation (sigma), 2.5 and 97.5 % percentile of mean values) for bootstrapped agreement values (n = 2 to 32). For each agreement measure in each dataset (commercial-lab and everyday-online), it generates a .csv file. 
+
+##Load libraries
+```{r loadLibraries}
+library(dplyr)
+```
+
+##Peakiness 
+#Commercial-lab 
+
+```{r peakiness_commercial}
+#Load data
+setwd('../data/bootstrapped/')
+peakiness.commercial <- read.delim("esMethods_Peakiness_adjust_c0.1_f0.05_1000Iterations_commercial.txt", head = TRUE)
+
+#Select datasets for 'sample' condition 
+peakiness.commercial <- peakiness.commercial[peakiness.commercial$testCond == 'sample',]
+
+peakiness.commercial.summary <- peakiness.commercial %>% dplyr::group_by(sampleSize, grain) %>% dplyr::summarise(mean = mean(peakiness), sd = sd(peakiness), sigma = sd(peakiness)/sqrt(as.numeric(as.character(sampleSize))), lower.quantile = quantile(peakiness, c(0.025)), upper.quantile = quantile(peakiness, c(0.975))) %>% dplyr::group_by(sampleSize, grain) %>% dplyr::summarise(mean = mean(mean), sd = mean(sd), sigma = mean(sigma), lower.quantile = mean(lower.quantile), upper.quantile = mean(upper.quantile))
+
+peakiness.commercial.summary.t <- as.data.frame(rbind(t(as.matrix(peakiness.commercial.summary[peakiness.commercial.summary$grain == 'c',])), 
+                                                t(as.matrix(peakiness.commercial.summary[peakiness.commercial.summary$grain == 'f',]))))
+
+
+setwd('../summary_statistics/')
+write.table(peakiness.commercial.summary.t, file = "esMethods_peakiness_bootstrapSummaryStatistics_commercial.csv", sep = ',', row.names = TRUE)
+```
+
+#Everyday-online 
+
+```{r peakiness_evAct}
+#Load data
+setwd('../data/bootstrapped/')
+peakiness.evAct <- read.delim("esMethods_Peakiness_adjust_c0.1_f0.05_1000Iterations_evAct.txt", head = TRUE)
+
+#Select datasets for 'sample' condition 
+peakiness.evAct <- peakiness.evAct[peakiness.evAct$testCond == 'sample',]
+
+peakiness.evAct.summary <- peakiness.evAct %>% dplyr::group_by(sampleSize, grain) %>% dplyr::summarise(mean = mean(peakiness), sd = sd(peakiness), sigma = sd(peakiness)/sqrt(as.numeric(as.character(sampleSize))), lower.quantile = quantile(peakiness, c(0.025)), upper.quantile = quantile(peakiness, c(0.975))) %>% dplyr::group_by(sampleSize, grain) %>% dplyr::summarise(mean = mean(mean), sd = mean(sd), sigma = mean(sigma), lower.quantile = mean(lower.quantile), upper.quantile = mean(upper.quantile))
+
+peakiness.evAct.summary.t <- as.data.frame(rbind(t(as.matrix(peakiness.evAct.summary[peakiness.evAct.summary$grain == 'c',])), 
+                                                t(as.matrix(peakiness.evAct.summary[peakiness.evAct.summary$grain == 'f',]))))
+
+
+setwd('../summary_statistics/')
+write.table(peakiness.evAct.summary.t, file = "esMethods_peakiness_bootstrapSummaryStatistics_evAct.csv", sep = ',', row.names = TRUE)
+```
+
+##Peak-to-peak distance
+
+#Commercial-lab 
+```{r peaktopeak_commercial}
+#Load data
+setwd('../data/bootstrapped/')
+peaktopeak.commercial <- read.delim("esMethods_PeakPeakDistance_c0.1_f0.05_1000Iterations_commercial.txt", head = TRUE)
+
+#Select datasets for 'sample' condition 
+peaktopeak.commercial <- peaktopeak.commercial[peaktopeak.commercial$testCond == 'sample',]
+
+peaktopeak.commercial.summary <- peaktopeak.commercial %>% dplyr::group_by(sampleSize, grain) %>% dplyr::summarise(mean = mean(nearestDistance), sd = sd(nearestDistance), sigma = sd(nearestDistance)/sqrt(as.numeric(as.character(sampleSize))), lower.quantile = quantile(nearestDistance, c(0.025)), upper.quantile = quantile(nearestDistance, c(0.975))) %>% dplyr::group_by(sampleSize, grain) %>% dplyr::summarise(mean = mean(mean), sd = mean(sd), sigma = mean(sigma), lower.quantile = mean(lower.quantile), upper.quantile = mean(upper.quantile))
+
+peaktopeak.commercial.summary.t <- as.data.frame(rbind(t(as.matrix(peaktopeak.commercial.summary[peaktopeak.commercial.summary$grain == 'c',])), 
+                                                t(as.matrix(peaktopeak.commercial.summary[peaktopeak.commercial.summary$grain == 'f',]))))
+
+
+setwd('../summary_statistics/')
+write.table(peaktopeak.commercial.summary.t, file = "esMethods_PeakPeakDistance_bootstrapSummaryStatistics_commercial.csv", sep = ',', row.names = TRUE)
+```
+
+#Everyday-online
+```{r peaktopeak_evAct}
+#Load data
+setwd('../data/bootstrapped/')
+peaktopeak.evAct <- read.delim("esMethods_PeakPeakDistance_c0.1_f0.05_1000Iterations_evAct.txt", head = TRUE)
+
+#Select datasets for 'sample' condition 
+peaktopeak.evAct <- peaktopeak.evAct[peaktopeak.evAct$testCond == 'sample',]
+
+peaktopeak.evAct.summary <- peaktopeak.evAct %>% dplyr::group_by(sampleSize, grain) %>% dplyr::summarise(mean = mean(nearestDistance), sd = sd(nearestDistance), sigma = sd(nearestDistance)/sqrt(as.numeric(as.character(sampleSize))), lower.quantile = quantile(nearestDistance, c(0.025)), upper.quantile = quantile(nearestDistance, c(0.975))) %>% dplyr::group_by(sampleSize, grain) %>% dplyr::summarise(mean = mean(mean), sd = mean(sd), sigma = mean(sigma), lower.quantile = mean(lower.quantile), upper.quantile = mean(upper.quantile))
+
+peaktopeak.evAct.summary.t <- as.data.frame(rbind(t(as.matrix(peaktopeak.evAct.summary[peaktopeak.evAct.summary$grain == 'c',])), 
+                                                t(as.matrix(peaktopeak.evAct.summary[peaktopeak.evAct.summary$grain == 'f',]))))
+
+
+setwd('../summary_statistics/')
+write.table(peaktopeak.evAct.summary.t, file = "esMethods_PeakPeakDistance_bootstrapSummaryStatistics_evAct.csv", sep = ',', row.names = TRUE)
+```
+
+##Agreement index
+
+#Commercial-lab 
+
+```{r agreement_commercial}
+#Load data
+setwd('../data/bootstrapped/')
+agreement.commercial <- read.delim("esMethods_AgreementIndex_1000Iterations_commercial.txt", head = TRUE)
+
+#Select datasets for 'sample' condition 
+agreement.commercial <- agreement.commercial[agreement.commercial$testCond == 'sample',]
+
+agreement.commercial.summary <- agreement.commercial %>% dplyr::group_by(sampleSize, grain) %>% dplyr::summarise(mean = mean(agreementIndex), sd = sd(agreementIndex), sigma = sd(agreementIndex)/sqrt(as.numeric(as.character(sampleSize))), lower.quantile = quantile(agreementIndex, c(0.025)), upper.quantile = quantile(agreementIndex, c(0.975))) %>% dplyr::group_by(sampleSize, grain) %>% dplyr::summarise(mean = mean(mean), sd = mean(sd), sigma = mean(sigma), lower.quantile = mean(lower.quantile), upper.quantile = mean(upper.quantile))
+
+agreement.commercial.summary.t <- as.data.frame(rbind(t(as.matrix(agreement.commercial.summary[agreement.commercial.summary$grain == 'c',])), 
+                                                t(as.matrix(agreement.commercial.summary[agreement.commercial.summary$grain == 'f',]))))
+
+
+setwd('../summary_statistics/')
+write.table(agreement.commercial.summary.t, file = "esMethods_AgreementIndex_bootstrapSummaryStatistics_commercial.csv", sep = ',', row.names = TRUE)
+```
+
+#Everyday-online
+
+```{r agreement_evAct}
+#Load data
+setwd('../data/bootstrapped/')
+agreement.evAct <- read.delim("esMethods_AgreementIndex_1000Iterations_evAct.txt", head = TRUE)
+
+#Select datasets for 'sample' condition 
+agreement.evAct <- agreement.evAct[agreement.evAct$testCond == 'sample',]
+
+agreement.evAct.summary <- agreement.evAct %>% dplyr::group_by(sampleSize, grain) %>% dplyr::summarise(mean = mean(agreementIndex), sd = sd(agreementIndex), sigma = sd(agreementIndex)/sqrt(as.numeric(as.character(sampleSize))), lower.quantile = quantile(agreementIndex, c(0.025)), upper.quantile = quantile(agreementIndex, c(0.975))) %>% dplyr::group_by(sampleSize, grain) %>% dplyr::summarise(mean = mean(mean), sd = mean(sd), sigma = mean(sigma), lower.quantile = mean(lower.quantile), upper.quantile = mean(upper.quantile))
+
+agreement.evAct.summary.t <- as.data.frame(rbind(t(as.matrix(agreement.evAct.summary[agreement.evAct.summary$grain == 'c',])), 
+                                                t(as.matrix(agreement.evAct.summary[agreement.evAct.summary$grain == 'f',]))))
+
+
+setwd('../summary_statistics/')
+write.table(agreement.evAct.summary.t, file = "esMethods_AgreementIndex_bootstrapSummaryStatistics_evAct.csv", sep = ',', row.names = TRUE)
+```
+
+##Surprise Index
+
+#Commercial-lab 
+
+```{r surprise_commercial}
+#Load data
+setwd('../data/bootstrapped/')
+surprise.commercial <- read.delim("esMethods_SurpriseIndex_c0.1_f0.05_1000Iterations_commercial.txt", head = TRUE)
+
+#Select datasets for 'sample' condition 
+surprise.commercial <- surprise.commercial[surprise.commercial$testCond == 'sample',]
+
+surprise.commercial.summary <- surprise.commercial %>% dplyr::group_by(sampleSize, grain) %>% dplyr::summarise(mean = mean(surpriseIndex), sd = sd(surpriseIndex), sigma = sd(surpriseIndex)/sqrt(as.numeric(as.character(sampleSize))), lower.quantile = quantile(surpriseIndex, c(0.025)), upper.quantile = quantile(surpriseIndex, c(0.975))) %>% dplyr::group_by(sampleSize, grain) %>% dplyr::summarise(mean = mean(mean), sd = mean(sd), sigma = mean(sigma), lower.quantile = mean(lower.quantile), upper.quantile = mean(upper.quantile))
+
+surprise.commercial.summary.t <- as.data.frame(rbind(t(as.matrix(surprise.commercial.summary[surprise.commercial.summary$grain == 'c',])), 
+                                                t(as.matrix(surprise.commercial.summary[surprise.commercial.summary$grain == 'f',]))))
+
+
+setwd('../summary_statistics/')
+write.table(surprise.commercial.summary.t, file = "esMethods_SurpriseIndex_bootstrapSummaryStatistics_commercial.csv", sep = ',', row.names = TRUE)
+```
+
+#Everyday-online
+
+```{r surprise_evAct}
+#Load data
+setwd('../data/bootstrapped/')
+surprise.evAct <- read.delim("esMethods_SurpriseIndex_c0.1_f0.05_1000Iterations_evAct.txt", head = TRUE)
+
+#Select datasets for 'sample' condition 
+surprise.evAct <- surprise.evAct[surprise.evAct$testCond == 'sample',]
+
+surprise.evAct.summary <- surprise.evAct %>% dplyr::group_by(sampleSize, grain) %>% dplyr::summarise(mean = mean(surpriseIndex), sd = sd(surpriseIndex), sigma = sd(surpriseIndex)/sqrt(as.numeric(as.character(sampleSize))), lower.quantile = quantile(surpriseIndex, c(0.025)), upper.quantile = quantile(surpriseIndex, c(0.975))) %>% dplyr::group_by(sampleSize, grain) %>% dplyr::summarise(mean = mean(mean), sd = mean(sd), sigma = mean(sigma), lower.quantile = mean(lower.quantile), upper.quantile = mean(upper.quantile))
+
+surprise.evAct.summary.t <- as.data.frame(rbind(t(as.matrix(surprise.evAct.summary[surprise.evAct.summary$grain == 'c',])), 
+                                                t(as.matrix(surprise.evAct.summary[surprise.evAct.summary$grain == 'f',]))))
+
+
+setwd('../summary_statistics/')
+write.table(surprise.evAct.summary.t, file = "esMethods_SurpriseIndex_bootstrapSummaryStatistics_evAct.csv", sep = ',', row.names = TRUE)
+```

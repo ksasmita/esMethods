@@ -1,0 +1,320 @@
+---
+title: "Calculate sample agreement values"
+author: "Karen Sasmita"
+date: "8/9/2021"
+output: html_document
+---
+This script calculates the different agreement metrics (peakiness, peak-to-peak distance, agreement index, and surprise index) for the full samples (commercial-lab and everyday-activities) used in paper: Sasmita, K. & Swallow, K. M. (2021). Measuring Event Segmentation: An Investigation into the Stability of Event Boundary Agreement Across Groups
+
+# **Initiation**
+
+Load necessary libraries
+```{r loadLibraries}
+rm(list = ls())
+library('dplyr')
+library('knitr')
+```
+
+## Clear workspace and load datasets
+```{r loadDatasets}
+setwd('../data/raw')
+ts.data.commercial <- read.delim("esMethods_Commercial_TimeSeries_Filtered.txt", head = TRUE)
+ts.data.evAct <- read.delim("esMethods_EvAct_TimeSeries_Filtered.txt", head = TRUE)
+names(ts.data.commercial)[names(ts.data.commercial) == "movName"] <- "movieName"
+names(ts.data.evAct)[names(ts.data.evAct) == "movName"] <- "movieName"
+segment.data.commercial <- read.delim("esMethods_Commercial_SegmentData_Filtered.txt", head = TRUE)
+segment.data.evAct <- read.delim("esMethods_evAct_SegmentData_Filtered.txt", head = TRUE)
+```
+
+## Set parameter for video stimuli
+Each dataset (commercial-lab & everyda-online) consist of segmentation on different movies. To make comparison across movies, segmentation data limited to the shortest movies (in seconds)
+```{r setVideoParams}
+mov.dur.comm <- 566 #movie duration (in s) of commercial movie
+mov.dur.evAct <- 273 #movie duration (in s) of everyday activity video
+```
+
+## Limit button press times to movie duration 
+
+```{r filterDatasets}
+ts.data.commercial <- ts.data.commercial[ts.data.commercial$timeSeries < mov.dur.comm,]
+ts.data.evAct <- ts.data.evAct[ts.data.evAct$timeSeries < mov.dur.evAct,]
+
+segment.data.commercial <- segment.data.commercial[segment.data.commercial$bpTime < mov.dur.comm,]
+segment.data.evAct <- segment.data.evAct[segment.data.evAct$bpTime < mov.dur.evAct,]
+```
+
+## Check data structure
+
+### Calculation of peakiness, peak-to-peak distance and surprise index done on button press times. 
+### *Commercial-lab*
+```{r showSegmentDataStructureComm}
+head(segment.data.commercial)
+```
+### *Everyday-online*
+```{r showSegmentDataStructureEvAct}
+head(segment.data.evAct)
+```
+
+### Calculation of agreement index uses binned timeseries data - indicating presence/ absence of button press per second 
+
+### *Commercial-lab*
+
+```{r showTimeSeriesDataComm}
+head(ts.data.commercial)
+```
+
+### *Everyday-online*
+
+```{r showTimeSeriesDataEvAct}
+head(ts.data.evAct)
+```
+
+## Load function script
+```{r}
+source('get.esMethods.metrices.r')
+```
+
+## Set parameters for density estimation
+Parameters necessary for creation of group button press density estimates for calculation of peakiness, peak-to-peak distance, and surprise index. 
+```{r setDensityParams}
+bw = 'sj'
+dens.hz = 1
+adj.size.c = 0.1
+adj.size.f = 0.05
+```
+
+## Set parameters for overlapping individual to group boundary window (for surprise index calculation)
+Set the window of overlap between individual button press and group normative boundary times. 
+```{r setSurpriseWindowParam}
+sup.index.window = 1 # in seconds
+```
+
+# **Calculate Peakiness** 
+## Commercial-lab
+```{r peakiness_commercial}
+peakiness.commercial <- data.frame()
+
+for(movie in unique(segment.data.commercial$movieName)){
+  for(segmentGrain in unique(segment.data.commercial$grain)){
+    if(segmentGrain == 'c'){
+      adj.size = adj.size.c
+    } else {
+      adj.size = adj.size.f
+    }
+    dat <- segment.data.commercial[segment.data.commercial$movieName == movie &
+                                     segment.data.commercial$grain == segmentGrain,]
+    
+    peakiness <- get.peakiness(dat$bpTime, mov.dur.comm, dat$subid, adj.size, bw) #calculate peakiness
+    peakiness.commercial <- rbind(peakiness.commercial, 
+                                  data.frame(condition = 'commercial_lab', movieName = movie, grain = segmentGrain, minRugosity = peakiness[1], rugosity = peakiness[2], peakiness = peakiness[3])) 
+  }
+}
+
+peakiness.commercial %>% dplyr::group_by(grain) %>% dplyr::summarise(mean = mean(peakiness)) %>% kable(caption = "Peakiness commercial-lab")
+
+```
+## Everyday-online
+```{r peakiness_evAct}
+peakiness.evAct <- data.frame()
+
+for(movie in unique(segment.data.evAct$movieName)){
+  for(segmentGrain in unique(segment.data.evAct$grain)){
+    if(segmentGrain == 'c'){
+      adj.size = adj.size.c
+    } else {
+      adj.size = adj.size.f
+    }
+    dat <- segment.data.evAct[segment.data.evAct$movieName == movie &
+                                     segment.data.evAct$grain == segmentGrain,]
+    
+    peakiness <- get.peakiness(dat$bpTime, mov.dur.evAct, dat$subid, adj.size, bw) #calculate peakiness
+    peakiness.evAct <- rbind(peakiness.evAct, 
+                                  data.frame(condition = 'everyday-online', movieName = movie, grain = segmentGrain, minRugosity = peakiness[1], rugosity = peakiness[2], peakiness = peakiness[3])) 
+  }
+}
+
+peakiness.evAct %>% dplyr::group_by(grain) %>% dplyr::summarise(mean = mean(peakiness)) %>% kable(caption = "Peakiness everyday-online")
+
+```
+
+# **Calculate peak-to-peak distance** 
+Peak-to-peak distance calculates agreement between two non-overlapping groups. Here, peak-to-peak distance was calculated by randomly splitting segmentation data on each movie into 2 groups. 
+
+## Commercial-lab 
+```{r peaktopeak_commercial, cache = TRUE}
+peaktopeak.comm <- data.frame()
+
+
+for(movie in unique(segment.data.commercial$movieName)){
+  for(segmentGrain in unique(segment.data.commercial$grain)){
+    if(segmentGrain == 'c'){
+      adj.size = adj.size.c
+    } else {
+      adj.size = adj.size.f
+    }
+    dat <- segment.data.commercial[segment.data.commercial$movieName == movie &
+                                     segment.data.commercial$grain == segmentGrain,]
+    
+    #select 2 random pool of non-overlapping subjects 
+    sample1.subs <- sample(unique(dat$subid), length(unique(dat$subid))/2)
+    sample2.subs <- unique(dat$subid)[!unique(dat$subid) %in% sample1.subs]
+    
+    #calculate average number of bps for sample1 and sample2 
+    ave.sample1.bp <- mean(tapply(dat$bpTime[dat$subid %in% sample1.subs], dat$subid[dat$subid %in% sample1.subs], length))
+    ave.sample2.bp <- mean(tapply(dat$bpTime[dat$subid %in% sample2.subs], dat$subid[dat$subid %in% sample2.subs], length))
+    
+    #calculate peak-to-peak distance 
+    pktopk <- get.peaktopeak.distance(dat$bpTime[dat$subid %in% sample1.subs], dat$bpTime[dat$subid %in% sample2.subs],mov.dur.comm, adj.size, ave.sample1.bp, ave.sample2.bp, bw, dens.hz) 
+    
+    #put peaktopeak distance in dataframe
+    peaktopeak.comm <- rbind(peaktopeak.comm, 
+                                  data.frame(condition = 'commercial-lab', movieName = movie, grain = segmentGrain, peaktopeak_distance = pktopk)) 
+  }
+}
+
+peaktopeak.comm %>% dplyr::group_by(grain) %>% dplyr::summarise(mean = mean(peaktopeak_distance)) %>% kable(caption = "Peak-to-peak distance commercial-lab")
+
+```
+
+## Everyday-online 
+```{r peaktopeak_everyday, cache = TRUE}
+peaktopeak.evAct <- data.frame()
+
+for(movie in unique(segment.data.evAct$movieName)){
+  for(segmentGrain in unique(segment.data.evAct$grain)){
+    if(segmentGrain == 'c'){
+      adj.size = adj.size.c
+    } else {
+      adj.size = adj.size.f
+    }
+    dat <- segment.data.evAct[segment.data.evAct$movieName == movie &
+                                     segment.data.evAct$grain == segmentGrain,]
+    
+    #select 2 random pool of non-overlapping subjects 
+    sample1.subs <- sample(unique(dat$subid), length(unique(dat$subid))/2)
+    sample2.subs <- unique(dat$subid)[!unique(dat$subid) %in% sample1.subs]
+    
+    #calculate average number of bps for sample1 and sample2 
+    ave.sample1.bp <- mean(tapply(dat$bpTime[dat$subid %in% sample1.subs], dat$subid[dat$subid %in% sample1.subs], length))
+    ave.sample2.bp <- mean(tapply(dat$bpTime[dat$subid %in% sample2.subs], dat$subid[dat$subid %in% sample2.subs], length))
+    
+    #calculate peak-to-peak distance 
+    pktopk <- get.peaktopeak.distance(dat$bpTime[dat$subid %in% sample1.subs], dat$bpTime[dat$subid %in% sample2.subs],mov.dur.comm, adj.size, ave.sample1.bp, ave.sample2.bp, bw, dens.hz)
+    
+    #put peaktopeak distance in dataframe
+    peaktopeak.evAct <- rbind(peaktopeak.evAct, 
+                                  data.frame(condition = 'everyday-online', movieName = movie, grain = segmentGrain, peaktopeak_distance = pktopk)) 
+  }
+}
+
+peaktopeak.evAct %>% dplyr::group_by(grain) %>% dplyr::summarise(mean = mean(peaktopeak_distance)) %>% kable(caption = "Peak-to-peak distance everyday-online")
+
+```
+
+# **Calculate agreement index** 
+## Commercial-lab 
+
+
+```{r agreementIndex_commercial}
+agreement.comm <- data.frame()
+
+for(movie in unique(ts.data.commercial$movieName)){
+  for(segmentGrain in unique(ts.data.commercial$grain)){
+    dat <- ts.data.commercial[ts.data.commercial$movieName == movie & ts.data.commercial$grain == segmentGrain,]
+    ag.index <- c()
+    for(subject in unique(dat$subid)){
+      agreement <- get.agreement.index(dat$subject.bp[dat$subid == subject], tapply(dat$subject.bp[dat$subid != subject], dat$timeSeries[dat$subid != subject], mean))
+      ag.index <- rbind(ag.index, agreement)
+    }
+    agreement.comm <- rbind(agreement.comm, data.frame(condition = 'commercial-lab', movieName = movie, grain = segmentGrain, agreementIndex = ag.index[,4]))
+  }
+}
+
+agreement.comm %>% dplyr::group_by(grain) %>% dplyr::summarise(mean = mean(agreementIndex), sd = sd(agreementIndex)) %>% kable(caption = "Agreement index commercial-lab")
+
+```
+
+## Commercial-lab 
+
+```{r agreementIndex_evAct}
+agreement.evAct <- data.frame()
+
+for(movie in unique(ts.data.evAct$movieName)){
+  for(segmentGrain in unique(ts.data.evAct$grain)){
+    dat <- ts.data.evAct[ts.data.evAct$movieName == movie & ts.data.evAct$grain == segmentGrain,]
+    ag.index <- c()
+    for(subject in unique(dat$subid)){
+      agreement <- get.agreement.index(dat$subject.bp[dat$subid == subject], tapply(dat$subject.bp[dat$subid != subject], dat$timeSeries[dat$subid != subject], mean))
+      ag.index <- rbind(ag.index, agreement)
+    }
+    agreement.evAct <- rbind(agreement.evAct, data.frame(condition = 'everyday-online', movieName = movie, grain = segmentGrain, agreementIndex = ag.index[,4]))
+  }
+}
+
+agreement.evAct %>% dplyr::group_by(grain) %>% dplyr::summarise(mean = mean(agreementIndex), sd = sd(agreementIndex)) %>% kable(caption = "Agreement index everyday-online")
+
+```
+
+
+# **Calculate surprise index** 
+## Commercial-lab 
+
+```{r surpriseIndex_commercial}
+surprise.index.commercial <- data.frame()
+
+for(movie in unique(segment.data.commercial$movieName)){
+  for(segmentGrain in unique(segment.data.commercial$grain)){
+    if(segmentGrain == 'c'){
+      adj.size = adj.size.c
+    } else if (segmentGrain == 'f'){
+      adj.size = adj.size.f
+    }
+    dat <- segment.data.commercial[segment.data.commercial$movieName == movie & 
+                                   segment.data.commercial$grain == segmentGrain,]
+    
+    for(subject in unique(dat$subid)){
+      sub.bp <- dat$bpTime[dat$subid == subject]
+      gp.bp <- dat$bpTime[dat$subid != subject]
+      ave.bp <- mean(tapply(dat$bpTime[dat$subid!=subject], dat$subid[dat$subid != subject], length))
+      
+      #calculate surprise index
+      sp.index <- get.surprise.index(sub.bp, gp.bp, mov.dur.comm, ave.bp, bw, adj.size, sup.index.window, dens.hz)
+      surprise.index.commercial <- rbind(surprise.index.commercial, data.frame(condition = 'commercial-lab', subject = subject, movieName = movie, grain = segmentGrain, surpriseIndex = sp.index))
+    }
+  }
+}
+
+surprise.index.commercial %>% dplyr::group_by(grain) %>% dplyr::summarise(mean = mean(surpriseIndex), sd = sd(surpriseIndex)) %>% kable(caption = "Surprise index commercial-lab")
+
+```
+## Everyday-online 
+
+```{r surpriseIndex_evAct}
+surprise.index.evAct <- data.frame()
+
+for(movie in unique(segment.data.evAct$movieName)){
+  for(segmentGrain in unique(segment.data.evAct$grain)){
+    if(segmentGrain == 'c'){
+      adj.size = adj.size.c
+    } else if (segmentGrain == 'f'){
+      adj.size = adj.size.f
+    }
+    dat <- segment.data.evAct[segment.data.evAct$movieName == movie & 
+                                   segment.data.evAct$grain == segmentGrain,]
+    
+    for(subject in unique(dat$subid)){
+      sub.bp <- dat$bpTime[dat$subid == subject]
+      gp.bp <- dat$bpTime[dat$subid != subject]
+      ave.bp <- mean(tapply(dat$bpTime[dat$subid!=subject], dat$subid[dat$subid != subject], length))
+      
+      #calculate surprise index
+      sp.index <- get.surprise.index(sub.bp, gp.bp, mov.dur.evAct, ave.bp, bw, adj.size, sup.index.window, dens.hz)
+      surprise.index.evAct <- rbind(surprise.index.evAct, data.frame(condition = 'everyday-online', subject = subject, movieName = movie, grain = segmentGrain, surpriseIndex = sp.index))
+    }
+  }
+}
+
+surprise.index.evAct %>% dplyr::group_by(grain) %>% dplyr::summarise(mean = mean(surpriseIndex), sd = sd(surpriseIndex)) %>% kable(caption = "Surprise index everyday-online")
+
+```
+
