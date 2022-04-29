@@ -1,8 +1,7 @@
 # esMethods
 This repository contains the data files and codes used in the paper:
 
-Measuring Event Segmentation: An Investigation into the Stability of Event Boundary Agreement Across Groups
-by K.Sasmita and K.M.Swallow 2021
+Sasmita, K., & Swallow, K. M.(2022). Measuring event segmentation: An investigation into the stability of event boundary agreement across groups. *Behavior Research Methods* doi: https://doi.org/10.3758/s13428-022-01832-5
 
 # Directory 
 
